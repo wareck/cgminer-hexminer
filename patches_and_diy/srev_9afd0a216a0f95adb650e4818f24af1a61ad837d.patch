@@ -1,0 +1,3859 @@
+--- cg_o/cgminer.c	2014-09-22 14:22:33.032837307 +0300
++++ scrypt_cgminer/cgminer.c	2014-09-22 14:25:50.139911198 +0300
+@@ -28,7 +28,7 @@
+ #include <assert.h>
+ #include <signal.h>
+ #include <limits.h>
+-
++//#include <scrypt.h>
+ #ifdef USE_USBUTILS
+ #include <semaphore.h>
+ #endif
+@@ -93,6 +93,12 @@
+ #include "driver-cointerra.h"
+ #endif
+ 
++
++#ifdef USE_HEXMINERS
++#include "driver-hexminers.h"
++#endif
++
++
+ #ifdef USE_HASHFAST
+ #include "driver-hashfast.h"
+ #endif
+@@ -100,7 +106,7 @@
+ #if defined(USE_ANT_S1) || defined(USE_ANT_S2)
+ #include "driver-bitmain.h"
+ #endif
+-
++//#include <scrypt.c>
+ #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_AVALON) || defined(USE_AVALON2) || defined(USE_MODMINER)
+ #	define USE_FPGA
+ #endif
+@@ -137,8 +143,8 @@
+ };
+ 
+ #ifdef HAVE_LIBCURL
+-static char *opt_btc_address;
+-static char *opt_btc_sig;
++static char *opt_ltc_address;
++static char *opt_ltc_sig;
+ #endif
+ static char *opt_benchfile;
+ static bool opt_benchfile_display;
+@@ -155,8 +161,8 @@
+ bool opt_compact;
+ const int opt_cutofftemp = 95;
+ int opt_log_interval = 5;
+-int opt_queue = 9999;
+-static int max_queue = 1;
++int opt_queue = 60;
++static int max_queue = 2;
+ int opt_scantime = -1;
+ int opt_expiry = 120;
+ static const bool opt_time = true;
+@@ -207,7 +213,8 @@
+ bool opt_api_network;
+ bool opt_delaynet;
+ bool opt_disable_pool;
+-static bool no_work;
++//static 
++bool no_work;
+ #ifdef USE_ICARUS
+ char *opt_icarus_options = NULL;
+ char *opt_icarus_timing = NULL;
+@@ -229,6 +236,9 @@
+ #ifdef USE_HASHRATIO
+ #include "driver-hashratio.h"
+ #endif
++#ifdef USE_HEXMINERS
++char *opt_hexminers_options = NULL;
++#endif
+ #ifdef USE_KLONDIKE
+ char *opt_klondike_options = NULL;
+ #endif
+@@ -276,7 +286,10 @@
+ int opt_usbdump = -1;
+ bool opt_usb_list_all;
+ cgsem_t usb_resource_sem;
++#if defined(USE_HEXMINERS)
++#else
+ static pthread_t usb_poll_thread;
++#endif
+ static bool usb_polling;
+ #endif
+ 
+@@ -346,7 +359,8 @@
+ double total_diff_accepted, total_diff_rejected, total_diff_stale;
+ static int staged_rollable;
+ unsigned int new_blocks;
+-static unsigned int work_block;
++//static
++unsigned int work_block;
+ unsigned int found_blocks;
+ 
+ unsigned int local_work;
+@@ -357,6 +371,11 @@
+ 
+ int total_pools, enabled_pools;
+ enum pool_strategy pool_strategy = POOL_FAILOVER;
++
++#if defined(USE_HEXMINERS)
++enum default_hex_miner default_hex_miner = D_HEXS;
++#endif
++
+ int opt_rotate_period;
+ static int total_urls, total_users, total_passes, total_userpasses;
+ 
+@@ -561,6 +580,7 @@
+ 	return cgpu;
+ }
+ 
++	
+ static void sharelog(const char*disposition, const struct work*work)
+ {
+ 	char *target, *hash, *data;
+@@ -709,9 +729,11 @@
+ {
+ 	struct pool *pool;
+ 
+-	cg_rlock(&control_lock);
++	//cg_rlock
++	cg_wlock(&control_lock);
+ 	pool = currentpool;
+-	cg_runlock(&control_lock);
++	cg_wunlock(&control_lock);
++	//cg_runlock
+ 
+ 	return pool;
+ }
+@@ -789,6 +811,15 @@
+ 		*val2 = *val1;
+ }
+ 
++
++#ifdef USE_HEXMINERS
++static char *set_default_to_s(enum default_hex_miner *which)
++{
++	*which = D_HEXS;
++	return NULL;
++}
++#endif
++
+ static char *set_balance(enum pool_strategy *strategy)
+ {
+ 	*strategy = POOL_BALANCE;
+@@ -1254,11 +1285,11 @@
+ 		     "Set BXM bits for overclocking"),
+ #endif
+ #ifdef HAVE_LIBCURL
+-	OPT_WITH_ARG("--btc-address",
+-		     opt_set_charp, NULL, &opt_btc_address,
+-		     "Set bitcoin target address when solo mining to bitcoind (mandatory)"),
+-	OPT_WITH_ARG("--btc-sig",
+-		     opt_set_charp, NULL, &opt_btc_sig,
++	OPT_WITH_ARG("--ltc-address",
++		     opt_set_charp, NULL, &opt_ltc_address,
++		     "Set litecoin target address when solo mining to litecoind (mandatory)"),
++	OPT_WITH_ARG("--ltc-sig",
++		     opt_set_charp, NULL, &opt_ltc_sig,
+ 		     "Set signature to add to coinbase when solo mining (optional)"),
+ #endif
+ #ifdef HAVE_CURSES
+@@ -1363,6 +1394,23 @@
+ 		     opt_set_charp, NULL, &opt_klondike_options,
+ 		     "Set klondike options clock:temptarget"),
+ #endif
++#ifdef USE_HEXMINERS
++OPT_WITH_ARG("--hexminers-options",
++		     opt_set_charp, NULL, &opt_hexminers_options,
++		     "Set hexminers options asic_count:freq"),
++	OPT_WITH_ARG("--hexminers-voltage",
++					opt_set_intval, NULL, &opt_hexminers_core_voltage,
++		     "Set hexminers core voltage, in millivolts"),
++	OPT_WITHOUT_ARG("--set_default_to_s",
++		     set_default_to_s, &default_hex_miner,
++		     "Handle USB detect errors as hexs"),
++	OPT_WITH_ARG("--hexminers-chip-mask",
++					opt_set_intval, NULL, &opt_hexminers_chip_mask,
++		     "Set hexminers eneable or disable chips"),	     
++	OPT_WITH_ARG("--hexminers-set-diff-to-one",
++		     opt_set_intval, NULL, &opt_hexminers_set_config_diff_to_one,
++		     "Set hexminers ASIC difficulty to one"),	     
++#endif
+ 	OPT_WITHOUT_ARG("--load-balance",
+ 		     set_loadbalance, &pool_strategy,
+ 		     "Change multipool strategy from failover to quota based balance"),
+@@ -1448,7 +1496,7 @@
+ #endif
+ 	OPT_WITH_ARG("--pass|-p",
+ 		     set_pass, NULL, &opt_set_null,
+-		     "Password for bitcoin JSON-RPC server"),
++		     "Password for litecoin JSON-RPC server"),
+ 	OPT_WITHOUT_ARG("--per-device-stats",
+ 			opt_set_bool, &want_per_device_stats,
+ 			"Force verbose mode and output per-device statistics"),
+@@ -1529,7 +1577,7 @@
+ 	),
+ 	OPT_WITH_ARG("--url|-o",
+ 		     set_url, NULL, &opt_set_null,
+-		     "URL for bitcoin JSON-RPC server"),
++		     "URL for litecoin JSON-RPC server"),
+ #ifdef USE_USBUTILS
+ 	OPT_WITH_ARG("--usb",
+ 		     opt_set_charp, NULL, &opt_usb_select,
+@@ -1543,10 +1591,10 @@
+ #endif
+ 	OPT_WITH_ARG("--user|-u",
+ 		     set_user, NULL, &opt_set_null,
+-		     "Username for bitcoin JSON-RPC server"),
++		     "Username for litecoin JSON-RPC server"),
+ 	OPT_WITH_ARG("--userpass|-O",
+ 		     set_userpass, NULL, &opt_set_null,
+-		     "Username:Password pair for bitcoin JSON-RPC server"),
++		     "Username:Password pair for litecoin JSON-RPC server"),
+ 	OPT_WITHOUT_ARG("--verbose",
+ 			opt_set_bool, &opt_log_output,
+ 			"Log verbose output to stderr as well as status output"),
+@@ -1776,6 +1824,9 @@
+ #ifdef USE_MINION
+ 		"minion "
+ #endif
++#ifdef USE_HEXMINERS
++		"hexminers "
++#endif
+ #ifdef USE_MODMINER
+ 		"modminer "
+ #endif
+@@ -1873,6 +1924,7 @@
+ 	int ret;
+ 
+ 	cg_wlock(&control_lock);
++	local_work++;
+ 	ret = total_work++;
+ 	cg_wunlock(&control_lock);
+ 
+@@ -2029,7 +2081,7 @@
+ 	}
+ 
+ 	calc_midstate(work);
+-	local_work++;
++	//local_work++;
+ 	work->pool = pool;
+ 	work->gbt = true;
+ 	work->longpoll = false;
+@@ -2355,12 +2407,12 @@
+ 	pool->nonce2_offset = 41 + ofs;
+ 	ofs += 8;
+ 
+-	if (opt_btc_sig) {
+-		len = strlen(opt_btc_sig);
++	if (opt_ltc_sig) {
++		len = strlen(opt_ltc_sig);
+ 		if (len > 32)
+ 			len = 32;
+ 		pool->scriptsig_base[ofs++] = len;
+-		memcpy(pool->scriptsig_base + ofs, opt_btc_sig, len);
++		memcpy(pool->scriptsig_base + ofs, opt_ltc_sig, len);
+ 		ofs += len;
+ 	}
+ 
+@@ -2519,7 +2571,7 @@
+ 
+ /* Convert a uint64_t value into a truncated string for displaying with its
+  * associated suitable for Mega, Giga etc. Buf array needs to be long enough */
+-static void suffix_string(uint64_t val, char *buf, size_t bufsiz, int sigdigits)
++void suffix_string(uint64_t val, char *buf, size_t bufsiz, int sigdigits)
+ {
+ 	const double  dkilo = 1000.0;
+ 	const uint64_t kilo = 1000ull;
+@@ -2720,7 +2772,8 @@
+ 
+ static void curses_print_devstatus(struct cgpu_info *cgpu, int devno, int count)
+ {
+-	static int devno_width = 1, dawidth = 1, drwidth = 1, hwwidth = 1, wuwidth = 1;
++	//static int devno_width = 1, dawidth = 1, drwidth = 1, hwwidth = 1, wuwidth = 1;
++	static int devno_width = 1, dawidth = 1, drwidth = 1, hwwidth = 1, hwwidthp = 1, prwidthp = 1, wuwidth = 1;
+ 	char logline[256], unique_id[12];
+ 	struct timeval now;
+ 	double dev_runtime, wu;
+@@ -2749,20 +2802,28 @@
+ 	wu = cgpu->diff1 / dev_runtime * 60;
+ 
+ 	wmove(statuswin,devcursor + count, 0);
++#if defined(USE_HEXMINERS)
++	double hwp = (cgpu->hw_errors + cgpu->diff1) ?
++		     (double)100 *(double)(cgpu->hw_errors) / (double)(cgpu->hw_errors + cgpu->diff1) : 0;
++		     
++ double prp = (cgpu->diff_accepted + cgpu->diff_rejected) ?
++		     (double)100 *(double)(cgpu->diff_rejected) / (double)(cgpu->diff_rejected + cgpu->diff_accepted) : 0;
++#endif
+ 	adj_width(devno, &devno_width);
+ 	if (cgpu->unique_id) {
+ 		unique_id[8] = '\0';
+ 		memcpy(unique_id, blanks, 8);
+ 		strncpy(unique_id, cgpu->unique_id, 8);
+ 	} else
+-		sprintf(unique_id, "%-8d", cgpu->device_id);
+-	cg_wprintw(statuswin, " %*d: %s %-8s: ", devno_width, devno, cgpu->drv->name,
++		sprintf(unique_id, "%-3d", cgpu->device_id);
++		unique_id[3] = '\0';
++	cg_wprintw(statuswin, " %*d: %s %-3s: ", devno_width, devno, cgpu->drv->name,
+ 		   unique_id);
+ 	logline[0] = '\0';
+ 	cgpu->drv->get_statline_before(logline, sizeof(logline), cgpu);
+ 	devstatlen = strlen(logline);
+-	if (devstatlen < STATBEFORELEN)
+-		strncat(logline, blanks, STATBEFORELEN - devstatlen);
++	if (devstatlen < STATBEFORELEN - 7)
++		strncat(logline, blanks, STATBEFORELEN - 7 - devstatlen);
+ 	cg_wprintw(statuswin, "%s | ", logline);
+ 
+ 
+@@ -2813,13 +2874,39 @@
+ 		adj_fwidth(cgpu->diff_accepted, &dawidth);
+ 		adj_fwidth(cgpu->diff_rejected, &drwidth);
+ 		adj_width(cgpu->hw_errors, &hwwidth);
+-		cg_wprintw(statuswin, "A:%*.0f R:%*.0f HW:%*d",
++#if defined(USE_HEXMINERS)
++	if(usb_ident(cgpu) == IDENT_HEXS) {
++		adj_width(prp, &prwidthp);
++		adj_width(hwp, &hwwidthp);
++	}
++#endif
++ 	
++ 		adj_width(wu, &wuwidth);
++#if defined(USE_HEXMINERS)
++	if(usb_ident(cgpu) == IDENT_HEXS) {
++		cg_wprintw(statuswin, "A:%*.0f R:%*.0f/%*.2f%% HW:%*d/%*.2f%%",
+ 				dawidth, cgpu->diff_accepted,
+ 				drwidth, cgpu->diff_rejected,
+-				hwwidth, cgpu->hw_errors);
++				prwidthp +1, prp,
++				hwwidth, cgpu->hw_errors,
++				hwwidthp + 1, hwp);
++	} else {
++		cg_wprintw(statuswin, "A:%*.0f R:%*.0f HW:%*d",
++			dawidth, cgpu->diff_accepted,
++			drwidth, cgpu->diff_rejected,
++			hwwidth, cgpu->hw_errors);
+ 	}
++#else
++ 		cg_wprintw(statuswin, "A:%*.0f R:%*.0f HW:%*d",
++ 				dawidth, cgpu->diff_accepted,
++ 				drwidth, cgpu->diff_rejected,
++ 				hwwidth, cgpu->hw_errors);
++#endif
+ 
+-	logline[0] = '\0';
++ 	}
++ 
++ 	logline[0] = '\0';
++	
+ 	cgpu->drv->get_statline(logline, sizeof(logline), cgpu);
+ 	cg_wprintw(statuswin, "%s", logline);
+ 
+@@ -3294,11 +3381,12 @@
+ 
+ 			if (work->work_difficulty < 1)
+ 				diffplaces = 6;
+-
++      //opt_scrypt
++      //opt_scrypt
+ 			snprintf(worktime, sizeof(worktime),
+ 				" <-%08lx.%08lx M:%c D:%1.*f G:%02d:%02d:%02d:%1.3f %s (%1.3f) W:%1.3f (%1.3f) S:%1.3f R:%02d:%02d:%02d",
++				(unsigned long)be32toh(*(uint32_t *)&(work->data[32])),
+ 				(unsigned long)be32toh(*(uint32_t *)&(work->data[28])),
+-				(unsigned long)be32toh(*(uint32_t *)&(work->data[24])),
+ 				work->getwork_mode, diffplaces, work->work_difficulty,
+ 				tm_getwork.tm_hour, tm_getwork.tm_min,
+ 				tm_getwork.tm_sec, getwork_time, workclone,
+@@ -3518,7 +3606,12 @@
+ static const double bits192 = 6277101735386680763835789423207666416102355444464034512896.0;
+ static const double bits128 = 340282366920938463463374607431768211456.0;
+ static const double bits64 = 18446744073709551616.0;
+-
++/*
++static const double truediffone = 26959535291011309493156476344723991336010898738574164086137773096960.0;
++static const double bits192 = 6277101735386680763835789423207666416102355444464034512896.0;
++static const double bits128 = 340282366920938463463374607431768211456.0;
++static const double bits64 = 18446744073709551616.0;
++*/
+ /* Converts a little endian 256 bit value to a double */
+ static double le256todouble(const void *target)
+ {
+@@ -3542,18 +3635,19 @@
+ 
+ static double diff_from_target(void *target)
+ {
++	
+ 	double d64, dcut64;
+-
++  //if (opt_scrypt)
++	
+ 	d64 = truediffone;
++	d64 *= (double)65536;
++
+ 	dcut64 = le256todouble(target);
+ 	if (unlikely(!dcut64))
+ 		dcut64 = 1;
+ 	return d64 / dcut64;
+ }
+ 
+-/*
+- * Calculate the work->work_difficulty based on the work->target
+- */
+ static void calc_diff(struct work *work, double known)
+ {
+ 	struct cgminer_pool_stats *pool_stats = &(work->pool->cgminer_pool_stats);
+@@ -4005,7 +4099,8 @@
+ 	mutex_unlock(&pool->pool_lock);
+ }
+ 
+-static bool stale_work(struct work *work, bool share);
++//static 
++bool stale_work(struct work *work, bool share);
+ 
+ static inline bool should_roll(struct work *work)
+ {
+@@ -4030,7 +4125,7 @@
+ 	return true;
+ }
+ 
+-/* Limit rolls to 7000 to not beyond 2 hours in the future where bitcoind will
++/* Limit rolls to 7000 to not beyond 2 hours in the future where litecoind will
+  * reject blocks as invalid. */
+ static inline bool can_roll(struct work *work)
+ {
+@@ -4059,7 +4154,7 @@
+ 	ntime = be32toh(*work_ntime);
+ 	ntime++;
+ 	*work_ntime = htobe32(ntime);
+-	local_work++;
++	//local_work++;
+ 	work->rolls++;
+ 	work->nonce = 0;
+ 	applog(LOG_DEBUG, "Successfully rolled work");
+@@ -4086,7 +4181,7 @@
+ 	applog(LOG_DEBUG, "Creating extra submit work thread");
+ 
+ 	ce = pop_curl_entry(pool);
+-	/* submit solution to bitcoin via JSON-RPC */
++	/* submit solution to litecoin via JSON-RPC */
+ 	while (!submit_upstream_work(work, ce->curl, resubmit)) {
+ 		if (opt_lowmem) {
+ 			applog(LOG_NOTICE, "Pool %d share being discarded to minimise memory cache", pool->pool_no);
+@@ -4132,6 +4227,7 @@
+ 
+ static bool clone_available(void)
+ {
++	return false;
+ 	struct work *work_clone = NULL, *work, *tmp;
+ 	bool cloned = false;
+ 
+@@ -4153,7 +4249,7 @@
+ 	mutex_unlock(stgd_lock);
+ 
+ 	if (cloned) {
+-		applog(LOG_DEBUG, "Pushing cloned available work to stage thread");
++		applog(LOG_ERR, "Pushing cloned available work to stage thread");
+ 		stage_work(work_clone);
+ 	}
+ 	return cloned;
+@@ -4164,6 +4260,7 @@
+  * the future */
+ static struct work *clone_work(struct work *work)
+ {
++	return work;
+ 	int mrs = mining_threads + opt_queue - total_staged();
+ 	struct work *work_clone;
+ 	bool cloned;
+@@ -4174,7 +4271,7 @@
+ 	cloned = false;
+ 	work_clone = make_clone(work);
+ 	while (mrs-- > 0 && can_roll(work) && should_roll(work)) {
+-		applog(LOG_DEBUG, "Pushing rolled converted work to stage thread");
++		applog(LOG_ERR, "Pushing rolled converted work to stage thread");
+ 		stage_work(work_clone);
+ 		roll_work(work);
+ 		work_clone = make_clone(work);
+@@ -4278,6 +4375,51 @@
+ 	return work;
+ }
+ 
++#if defined(USE_HEXMINERS)
++
++struct work *copy_work_noffset_fast_no_id(struct work *base_work, int noffset)
++{
++	
++  struct work *work = calloc(1, sizeof(struct work));
++
++	if (unlikely(!work))
++		quit(1, "Failed to calloc work in make_work");
++ 
++
++	memcpy(work, base_work, sizeof(struct work));
++	/* Keep the unique new id assigned during make_work to prevent copied
++	 * work from having the same id. */
++	if (base_work->job_id)
++		work->job_id = strdup(base_work->job_id);
++	if (base_work->nonce1)
++		work->nonce1 = strdup(base_work->nonce1);
++	if (base_work->ntime) {
++		/* If we are passed an noffset the binary work->data ntime and
++		 * the work->ntime hex string need to be adjusted. */
++		if (noffset) {
++			uint32_t *work_ntime = (uint32_t *)(work->data + 68);
++			uint32_t ntime = be32toh(*work_ntime);
++
++			ntime += noffset;
++			*work_ntime = htobe32(ntime);
++			work->ntime = offset_ntime(base_work->ntime, noffset);
++		} else
++			work->ntime = strdup(base_work->ntime);
++	} else if (noffset) {
++		uint32_t *work_ntime = (uint32_t *)(work->data + 68);
++		uint32_t ntime = be32toh(*work_ntime);
++
++		ntime += noffset;
++		*work_ntime = htobe32(ntime);
++	}
++	if (base_work->coinbase)
++		work->coinbase = strdup(base_work->coinbase);
++
++	return work;
++}
++
++#endif
++
+ void pool_died(struct pool *pool)
+ {
+ 	if (!pool_tset(pool, &pool->idle)) {
+@@ -4290,18 +4432,19 @@
+ 	}
+ }
+ 
+-static bool stale_work(struct work *work, bool share)
++//static 
++bool stale_work(struct work *work, bool share)
+ {
+ 	struct timeval now;
+ 	time_t work_expiry;
+ 	struct pool *pool;
+ 	int getwork_delay;
+ 
+-	if (opt_benchmark || opt_benchfile)
+-		return false;
++	//if (opt_benchmark || opt_benchfile)
++		//return false;
+ 
+ 	if (work->work_block != work_block) {
+-		applog(LOG_DEBUG, "Work stale due to block mismatch");
++		//applog(LOG_ERR, "Work stale due to block mismatch");
+ 		return true;
+ 	}
+ 
+@@ -4319,19 +4462,19 @@
+ 		bool same_job;
+ 
+ 		if (!pool->stratum_active || !pool->stratum_notify) {
+-			applog(LOG_DEBUG, "Work stale due to stratum inactive");
++			//applog(LOG_ERR, "Work stale due to stratum inactive");
+ 			return true;
+ 		}
+ 
+ 		same_job = true;
+-
+-		cg_rlock(&pool->data_lock);
++    cg_wlock(&pool->data_lock);
++	
+ 		if (strcmp(work->job_id, pool->swork.job_id))
+ 			same_job = false;
+-		cg_runlock(&pool->data_lock);
++		cg_wunlock(&pool->data_lock);
+ 
+ 		if (!same_job) {
+-			applog(LOG_DEBUG, "Work stale due to stratum job_id mismatch");
++			//applog(LOG_ERR, "Work stale due to stratum job_id mismatch");
+ 			return true;
+ 		}
+ 	}
+@@ -4345,13 +4488,13 @@
+ 
+ 	cgtime(&now);
+ 	if ((now.tv_sec - work->tv_staged.tv_sec) >= work_expiry) {
+-		applog(LOG_DEBUG, "Work stale due to expiry");
++		//applog(LOG_ERR, "Work stale due to expiry");
+ 		return true;
+ 	}
+ 
+ 	if (opt_fail_only && !share && pool != current_pool() && !work->mandatory &&
+ 	    pool_strategy != POOL_LOADBALANCE && pool_strategy != POOL_BALANCE) {
+-		applog(LOG_DEBUG, "Work stale due to fail only pool mismatch");
++		//applog(LOG_ERR, "Work stale due to fail only pool mismatch");
+ 		return true;
+ 	}
+ 
+@@ -4364,7 +4507,12 @@
+ 	double d64, s64;
+ 	uint64_t ret;
+ 
++	
++	//if (opt_scrypt)
++	
+ 	d64 = truediffone;
++	d64 *= (double)65536;
++	
+ 	s64 = le256todouble(work->hash);
+ 	if (unlikely(!s64))
+ 		s64 = 0;
+@@ -4386,7 +4534,7 @@
+ 
+ 	return ret;
+ }
+-
++/*
+ static void regen_hash(struct work *work)
+ {
+ 	uint32_t *data32 = (uint32_t *)(work->data);
+@@ -4399,6 +4547,7 @@
+ 	sha256(hash1, 32, (unsigned char *)(work->hash));
+ }
+ 
++*/
+ static bool cnx_needed(struct pool *pool);
+ 
+ /* Find the pool that currently has the highest priority */
+@@ -4621,7 +4770,10 @@
+ 	/* Cancels any cancellable usb transfers. Flagged as such it means they
+ 	 * are usualy waiting on a read result and it's safe to abort the read
+ 	 * early. */
++	#if defined(USE_HEXMINERS)
++	#else
+ 	cancel_usb_transfers();
++	#endif
+ #endif
+ 	return NULL;
+ }
+@@ -4832,19 +4984,19 @@
+ {
+ 	return worka->tv_staged.tv_sec - workb->tv_staged.tv_sec;
+ }
+-
++/*
+ static bool work_rollable(struct work *work)
+ {
+ 	return (!work->clone && work->rolltime);
+ }
+-
++*/
+ static bool hash_push(struct work *work)
+ {
+ 	bool rc = true;
+ 
+ 	mutex_lock(stgd_lock);
+-	if (work_rollable(work))
+-		staged_rollable++;
++	//if (work_rollable(work))
++		//staged_rollable++;
+ 	if (likely(!getq->frozen)) {
+ 		HASH_ADD_INT(staged_work, id, work);
+ 		HASH_SORT(staged_work, tv_sort);
+@@ -5068,6 +5220,10 @@
+ 	}
+ 
+ 	/* Special case options */
++#ifdef USE_HEXMINERS
++	if (default_hex_miner == D_HEXS)
++		 fputs(",\n\"set_default_to_s\" : true", fcfg);
++#endif
+ 	if (pool_strategy == POOL_BALANCE)
+ 		fputs(",\n\"balance\" : true", fcfg);
+ 	if (pool_strategy == POOL_LOADBALANCE)
+@@ -6466,12 +6622,12 @@
+ 	bool ret = false;
+ 	json_t *val = NULL, *res_val, *valid_val;
+ 
+-	if (!opt_btc_address) {
++	if (!opt_ltc_address) {
+ 		applog(LOG_ERR, "No BTC address specified, unable to mine solo on %s",
+ 		       pool->rpc_url);
+ 		goto out;
+ 	}
+-	snprintf(s, 256, "{\"method\": \"validateaddress\", \"params\": [\"%s\"]}\n", opt_btc_address);
++	snprintf(s, 256, "{\"method\": \"validateaddress\", \"params\": [\"%s\"]}\n", opt_ltc_address);
+ 	val = json_rpc_call(curl, pool->rpc_url, pool->rpc_userpass, s, true,
+ 			    false, &rolltime, pool, false);
+ 	if (!val)
+@@ -6483,12 +6639,12 @@
+ 	if (!valid_val)
+ 		goto out;
+ 	if (!json_is_true(valid_val)) {
+-		applog(LOG_ERR, "Bitcoin address %s is NOT valid", opt_btc_address);
++		applog(LOG_ERR, "Litecoin address %s is NOT valid", opt_ltc_address);
+ 		goto out;
+ 	}
+-	applog(LOG_NOTICE, "Solo mining to valid address: %s", opt_btc_address);
++	applog(LOG_NOTICE, "Solo mining to valid address: %s", opt_ltc_address);
+ 	ret = true;
+-	address_to_pubkeyhash(pool->script_pubkey, opt_btc_address);
++	address_to_pubkeyhash(pool->script_pubkey, opt_ltc_address);
+ 	hex2bin(scriptsig_header_bin, scriptsig_header, 41);
+ 	__setup_gbt_solo(pool);
+ 
+@@ -6568,6 +6724,7 @@
+ 		applog(LOG_DEBUG, "Probing for GBT support");
+ 		val = json_rpc_call(curl, pool->rpc_url, pool->rpc_userpass,
+ 				    gbt_req, true, false, &rolltime, pool, false);
++	
+ 		if (val) {
+ 			bool append = false, submit = false, transactions = false;
+ 			json_t *res_val, *mutables;
+@@ -6734,15 +6891,15 @@
+  * be handled. */
+ static struct work *hash_pop(bool blocking)
+ {
+-	struct work *work = NULL, *tmp;
+-	int hc;
++	struct work *work = NULL;//, *tmp;
++	//int hc;
+ 
+ 	mutex_lock(stgd_lock);
+ 	if (!HASH_COUNT(staged_work)) {
+ 		/* Increase the queue if we reach zero and we know we can reach
+ 		 * the maximum we're asking for. */
+ 		if (work_filled && max_queue < opt_queue) {
+-			max_queue++;
++			if(max_queue < most_devices * 2) max_queue++;
+ 			work_filled = false;
+ 		}
+ 		work_emptied = true;
+@@ -6773,18 +6930,18 @@
+ 		no_work = false;
+ 	}
+ 
+-	hc = HASH_COUNT(staged_work);
++	//hc = HASH_COUNT(staged_work);
+ 	/* Find clone work if possible, to allow masters to be reused */
+-	if (hc > staged_rollable) {
+-		HASH_ITER(hh, staged_work, work, tmp) {
+-			if (!work_rollable(work))
+-				break;
+-		}
+-	} else
++	//if (hc > staged_rollable) {
++		//HASH_ITER(hh, staged_work, work, tmp) {
++			//if (!work_rollable(work))
++				//break;
++		//}
++	//} else
+ 		work = staged_work;
+ 	HASH_DEL(staged_work, work);
+-	if (work_rollable(work))
+-		staged_rollable--;
++	//if (work_rollable(work))
++		//staged_rollable--;
+ 
+ 	/* Signal the getwork scheduler to look for more work */
+ 	pthread_cond_signal(&gws_cond);
+@@ -6820,7 +6977,12 @@
+ 		diff = 1.0;
+ 	}
+ 
++	
++	//if (opt_scrypt)
++	
+ 	d64 = truediffone;
++	d64 *= (double)65536;
++
+ 	d64 /= diff;
+ 
+ 	dcut64 = d64 / bits192;
+@@ -6908,7 +7070,7 @@
+ 	memcpy(pool->coinbase + pool->nonce2_offset, &nonce2le, pool->n2size);
+ 	work->nonce2 = pool->nonce2++;
+ 	work->nonce2_len = pool->n2size;
+-
++  work->job_id = strdup(pool->swork.job_id);
+ 	/* Downgrade to a read lock to read off the pool variables */
+ 	cg_dwlock(&pool->data_lock);
+ 
+@@ -6933,7 +7095,7 @@
+ 	work->sdiff = pool->sdiff;
+ 
+ 	/* Copy parameters required for share submission */
+-	work->job_id = strdup(pool->swork.job_id);
++//	work->job_id = strdup(pool->swork.job_id);
+ 	work->nonce1 = strdup(pool->nonce1);
+ 	work->ntime = strdup(pool->ntime);
+ 	cg_runlock(&pool->data_lock);
+@@ -6952,9 +7114,19 @@
+ 	}
+ 
+ 	calc_midstate(work);
++/*
++	char *mstate;
++	char *mstate1;
++	mstate = bin2hex(work->midstate, 16);
++	mstate1 = bin2hex(work->midstate+16, 16);
++	applog(LOG_ERR, "Generated stratum mstate %s", mstate);
++	applog(LOG_ERR, "Generated stratum mstate1 %s", mstate1);
++	free(mstate);
++	free(mstate1);
++*/
+ 	set_target(work->target, work->sdiff);
+ 
+-	local_work++;
++	//local_work++;
+ 	work->pool = pool;
+ 	work->stratum = true;
+ 	work->nonce = 0;
+@@ -7000,7 +7172,7 @@
+ 
+ 	get_gbt_curl(pool, 10);
+ retry:
+-	/* Bitcoind doesn't like many open RPC connections. */
++	/* litecoind doesn't like many open RPC connections. */
+ 	curl_easy_setopt(pool->gbt_curl, CURLOPT_FORBID_REUSE, 1);
+ 	val = json_rpc_call(pool->gbt_curl, pool->rpc_url, pool->rpc_userpass, pool->rpc_req,
+ 			    true, false, &rolltime, pool, false);
+@@ -7095,7 +7267,7 @@
+ 
+ 	calc_midstate(work);
+ 
+-	local_work++;
++	//local_work++;
+ 	work->gbt = true;
+ 	work->pool = pool;
+ 	work->nonce = 0;
+@@ -7138,7 +7310,7 @@
+ 	time_t diff_t;
+ 
+ 	thread_reportout(thr);
+-	applog(LOG_DEBUG, "Popping work from get queue to get work");
++	//applog(LOG_DEBUG, "Popping work from get queue to get work");
+ 	diff_t = time(NULL);
+ 	while (!work) {
+ 		work = hash_pop(true);
+@@ -7152,10 +7324,10 @@
+ 	 * the device's last valid work to not make outages appear to be
+ 	 * device failures. */
+ 	if (diff_t > 0) {
+-		applog(LOG_DEBUG, "Get work blocked for %d seconds", (int)diff_t);
++	//	applog(LOG_DEBUG, "Get work blocked for %d seconds", (int)diff_t);
+ 		cgpu->last_device_valid_work += diff_t;
+ 	}
+-	applog(LOG_DEBUG, "Got work from get queue to get work for thread %d", thr_id);
++	//applog(LOG_DEBUG, "Got work from get queue to get work for thread %d", thr_id);
+ 
+ 	work->thr_id = thr_id;
+ 	if (opt_benchmark)
+@@ -7239,43 +7411,60 @@
+ 	thr->cgpu->drv->hw_error(thr);
+ }
+ 
++extern void
++scrypt_regenhash (struct work *work);
++
++void inc_hw_errors_hexs(struct thr_info *thr, int diff)
++{
++	applog(LOG_INFO, "%s%d: invalid nonce - HW error", thr->cgpu->drv->name,
++	       thr->cgpu->device_id);
++
++	mutex_lock(&stats_lock);
++	hw_errors-=diff;
++	thr->cgpu->hw_errors-=diff;
++	mutex_unlock(&stats_lock);
++
++	thr->cgpu->drv->hw_error(thr);
++}
+ /* Fills in the work nonce and builds the output data in work->hash */
+ static void rebuild_nonce(struct work *work, uint32_t nonce)
+ {
+ 	uint32_t *work_nonce = (uint32_t *)(work->data + 64 + 12);
+-
+-	*work_nonce = htole32(nonce);
+-
+-	regen_hash(work);
++  *work_nonce = htole32(nonce);
++  		scrypt_regenhash(work);
++	
+ }
+ 
++	
+ /* For testing a nonce against diff 1 */
+ bool test_nonce(struct work *work, uint32_t nonce)
+ {
+ 	uint32_t *hash_32 = (uint32_t *)(work->hash + 28);
++	uint32_t diff1targ;
+ 
+ 	rebuild_nonce(work, nonce);
+-	return (*hash_32 == 0);
+-}
+-
+-/* For testing a nonce against an arbitrary diff */
+-bool test_nonce_diff(struct work *work, uint32_t nonce, double diff)
+-{
+-	uint64_t *hash64 = (uint64_t *)(work->hash + 24), diff64;
+-
+-	rebuild_nonce(work, nonce);
+-	diff64 = 0x00000000ffff0000ULL;
+-	diff64 /= diff;
+-
+-	return (le64toh(*hash64) <= diff64);
++	
++	diff1targ = 0x0000ffffUL;
++		
++	return (le32toh(*hash_32) <= diff1targ);
++	
+ }
++ 
+ 
+ static void update_work_stats(struct thr_info *thr, struct work *work)
+ {
+-	double test_diff = current_diff;
++	//if (opt_scrypt)
++	double test_diff;
++	test_diff = truediffone;
++	test_diff *= (double)65536;
+ 
+-	work->share_diff = share_diff(work);
++	 //* (double)65536;
+ 
++	work->share_diff = share_diff(work);
++  
++  ///??
++  //test_diff *= 65536;
++	///??
+ 	if (unlikely(work->share_diff >= test_diff)) {
+ 		work->block = true;
+ 		work->pool->solved++;
+@@ -7285,9 +7474,23 @@
+ 	}
+ 
+ 	mutex_lock(&stats_lock);
++#if defined(USE_HEXMINERS)
++if(work->ping) {
++	total_diff1 += work->device_diff;
++	thr->cgpu->diff1 += work->device_diff;
++	work->pool->diff1 += work->device_diff;
++ } else {
++ 	total_diff1 += work->work_difficulty;
++	thr->cgpu->diff1 += work->work_difficulty;
++	work->pool->diff1 += work->work_difficulty;
++ }
++#else
+ 	total_diff1 += work->device_diff;
+ 	thr->cgpu->diff1 += work->device_diff;
+ 	work->pool->diff1 += work->device_diff;
++#endif
++
++	
+ 	thr->cgpu->last_device_valid_work = time(NULL);
+ 	mutex_unlock(&stats_lock);
+ }
+@@ -7309,6 +7512,27 @@
+ 	return true;
+ }
+ 
++#if defined(USE_HEXMINERS)
++bool submit_tested_work_fast_clone(struct thr_info *thr, struct work *work, bool diff1)
++{
++	struct work *work_sub;
++	update_work_stats(thr, work);
++	
++  if(diff1) {
++		if (!fulltest(work->hash, work->target)) {
++			applog(LOG_INFO, "%s %d: Share above target",
++				thr->cgpu->drv->name, thr->cgpu->device_id);
++			return false;
++		}
++	}
++	
++  work_sub = copy_work_noffset_fast_no_id (work, 0);
++  
++	submit_work_async(work_sub);
++	return true;
++}
++#endif
++
+ /* Returns true if nonce for work was a valid share */
+ bool submit_nonce(struct thr_info *thr, struct work *work, uint32_t nonce)
+ {
+@@ -7404,9 +7628,10 @@
+ 	while (likely(!cgpu->shutdown)) {
+ 		struct work *work = get_work(mythr, thr_id);
+ 		int64_t hashes;
+-
++		
+ 		mythr->work_restart = false;
+ 		cgpu->new_work = true;
++		
+ 
+ 		cgtime(&tv_workstart);
+ 		work->nonce = 0;
+@@ -7418,6 +7643,31 @@
+ 		}
+ 		work->device_diff = MIN(drv->max_diff, work->work_difficulty);
+ 
++
++		//work->device_diff = MIN(drv->working_diff, work->work_difficulty);
++    //To be examined later	
++
++    #ifdef DEL_USE_SCRYPT
++		/* Dynamically adjust the working diff even if the target
++		 * diff is very high to ensure we can still validate scrypt is
++		 * returning shares. */
++		//if (opt_scrypt) 
++		if(0)
++		{
++			double wu;
++
++			wu = total_diff1 / total_secs * 60;
++			if (wu > 30 && drv->working_diff < drv->max_diff &&
++			    drv->working_diff < work->work_difficulty) {
++				drv->working_diff++;
++				applog(LOG_DEBUG, "Driver %s working diff changed to %.0f",
++					drv->dname, drv->working_diff);
++				work->device_diff = MIN(drv->working_diff, work->work_difficulty);
++			} else if (drv->working_diff > work->work_difficulty)
++				drv->working_diff = work->work_difficulty;
++			set_target(work->device_target, work->device_diff);
++		}
++#endif
+ 		do {
+ 			cgtime(&tv_start);
+ 
+@@ -7769,6 +8019,7 @@
+ 		free_work(work);
+ 		applog(LOG_DEBUG, "Discarded queued work item");
+ 	}
++	
+ }
+ 
+ /* This version of hash work is for devices that are fast enough to always
+@@ -7786,17 +8037,18 @@
+ 	while (likely(!cgpu->shutdown)) {
+ 		struct timeval diff;
+ 		int64_t hashes;
+-
++    
+ 		mythr->work_update = false;
+-
++  	
+ 		fill_queue(mythr, cgpu, drv, thr_id);
+ 
+ 		hashes = drv->scanwork(mythr);
+ 
+ 		/* Reset the bool here in case the driver looks for it
+ 		 * synchronously in the scanwork loop. */
++		
+ 		mythr->work_restart = false;
+-
++  	
+ 		if (unlikely(hashes == -1 )) {
+ 			applog(LOG_ERR, "%s %d failure, disabling!", drv->name, cgpu->device_id);
+ 			cgpu->deven = DEV_DISABLED;
+@@ -7818,7 +8070,7 @@
+ 		if (unlikely(mythr->pause || cgpu->deven != DEV_ENABLED))
+ 			mt_disable(mythr, thr_id, drv);
+ 
+-		if (mythr->work_update)
++ 		if (mythr->work_update)
+ 			drv->update_work(cgpu);
+ 	}
+ 	cgpu->deven = DEV_DISABLED;
+@@ -7869,7 +8121,7 @@
+ 		if (unlikely(mythr->pause || cgpu->deven != DEV_ENABLED))
+ 			mt_disable(mythr, thr_id, drv);
+ 
+-		if (mythr->work_update)
++    if (mythr->work_update)
+ 			drv->update_work(cgpu);
+ 	}
+ 	cgpu->deven = DEV_DISABLED;
+@@ -8600,9 +8852,12 @@
+ static void clean_up(bool restarting)
+ {
+ #ifdef USE_USBUTILS
+-	usb_polling = false;
+-	pthread_join(usb_poll_thread, NULL);
+-        libusb_exit(NULL);
++ usb_polling = false;
++#if defined(USE_HEXMINERS)
++#else
++ pthread_join(usb_poll_thread, NULL);      
++#endif
++ libusb_exit(NULL);
+ #endif
+ 
+ 	cgtime(&total_tv_end);
+@@ -9266,6 +9521,13 @@
+ #define DRIVER_DRV_DETECT_ALL(X) X##_drv.drv_detect(false);
+ 
+ #ifdef USE_USBUTILS
++//UGLY but if hotplug is ok we are disabling it. Something is happening here and we do not need it.
++//This breaks badly cgminer code (MIPS - TPLINK) and other device support but whoever wants please do enable it.
++//What happens is that for some reason pooling touches usbdev even though reads/writes are performed under lock like in usb-utils
++// same function actualy
++
++#if defined(USE_HEXMINERS)
++#else
+ static void *libusb_poll_thread(void __maybe_unused *arg)
+ {
+ 	struct timeval tv_end = {1, 0};
+@@ -9286,6 +9548,7 @@
+ 
+ 	return NULL;
+ }
++#endif
+ 
+ static void initialise_usb(void) {
+ 	int err = libusb_init(NULL);
+@@ -9297,14 +9560,20 @@
+ 	}
+ 	initialise_usblocks();
+ 	usb_polling = true;
++	#if defined(USE_HEXMINERS)
++	#else
++	
+ 	pthread_create(&usb_poll_thread, NULL, libusb_poll_thread, NULL);
++	#endif
+ }
+ #else
+ #define initialise_usb() {}
+ #endif
+ 
++
+ int main(int argc, char *argv[])
+ {
++	
+ 	struct sigaction handler;
+ 	struct work *work = NULL;
+ 	bool pool_msg = false;
+@@ -9410,6 +9679,8 @@
+ 		load_default_config();
+ 
+ 	if (opt_benchmark || opt_benchfile) {
++		//if (opt_scrypt)
++		quit(1, "Cannot use benchmark mode with scrypt");
+ 		struct pool *pool;
+ 
+ 		pool = add_pool();
+@@ -9467,9 +9738,9 @@
+ 
+ 	if (want_per_device_stats)
+ 		opt_log_output = true;
+-
++//opt_scrypt
+ 	if (opt_scantime < 0)
+-		opt_scantime = 60;
++		opt_scantime = 30;
+ 
+ 	total_control_threads = 8;
+ 	control_thr = calloc(total_control_threads, sizeof(*thr));
+@@ -9733,8 +10004,8 @@
+ 
+ 		/* If the primary pool is a getwork pool and cannot roll work,
+ 		 * try to stage one extra work per mining thread */
+-		if (!pool_localgen(cp) && !staged_rollable)
+-			max_staged += mining_threads;
++		//if (!pool_localgen(cp) && !staged_rollable)
++			//max_staged += mining_threads;
+ 
+ 		mutex_lock(stgd_lock);
+ 		ts = __total_staged();
+@@ -9745,7 +10016,7 @@
+ 		/* Wait until hash_pop tells us we need to create more work */
+ 		if (ts > max_staged) {
+ 			if (work_emptied && max_queue < opt_queue) {
+-				max_queue++;
++				if(max_queue < most_devices * 2) max_queue++;
+ 				work_emptied = false;
+ 			}
+ 			work_filled = true;
+@@ -9754,12 +10025,12 @@
+ 		}
+ 		mutex_unlock(stgd_lock);
+ 
+-		if (ts > max_staged) {
++		if (ts > max_staged ) {
+ 			/* Keeps slowly generating work even if it's not being
+ 			 * used to keep last_getwork incrementing and to see
+ 			 * if pools are still alive. */
+ 			if (work_emptied && max_queue < opt_queue) {
+-				max_queue++;
++				if(max_queue < most_devices * 2) max_queue++;
+ 				work_emptied = false;
+ 			}
+ 			work_filled = true;
+@@ -9853,7 +10124,7 @@
+ 
+ 		work->pool = pool;
+ 		ce = pop_curl_entry(pool);
+-		/* obtain new work from bitcoin via JSON-RPC */
++		/* obtain new work from litecoin via JSON-RPC */
+ 		if (!get_upstream_work(work, ce->curl)) {
+ 			applog(LOG_DEBUG, "Pool %d json_rpc_call failed on get work, retrying in 5s", pool->pool_no);
+ 			/* Make sure the pool just hasn't stopped serving
+--- cg_o/configure.ac	2014-09-22 14:22:33.036837532 +0300
++++ scrypt_cgminer/configure.ac	2014-09-22 14:25:50.139911198 +0300
+@@ -148,6 +148,18 @@
+ fi
+ 
+ 
++scrypt="no"
++
++AC_ARG_ENABLE([scrypt],
++	[AC_HELP_STRING([--enable-scrypt],[Compile support for scrypt litecoin mining (default disabled)])],
++	[scrypt=$enableval]
++	)
++if test "x$scrypt" = xyes; then
++	AC_DEFINE([USE_SCRYPT], [1], [Defined to 1 if scrypt support is wanted])
++fi
++
++AM_CONDITIONAL([HAS_SCRYPT], [test x$scrypt = xyes])
++
+ avalon="no"
+ 
+ AC_ARG_ENABLE([avalon],
+@@ -329,6 +341,17 @@
+ AM_CONDITIONAL([HAS_MINION], [test x$minion = xyes])
+ 
+ 
++hexminers="no"
++
++AC_ARG_ENABLE([hexminers],
++	[AC_HELP_STRING([--enable-hexminers],[Compile support for hexminers (default disabled)])],
++	[hexminers=$enableval]
++	)
++if test "x$hexminers" = xyes; then
++	AC_DEFINE([USE_HEXMINERS], [1], [Defined to 1 if hexminers support is wanted])
++fi
++AM_CONDITIONAL([HAS_HEXMINERS], [test x$hexminers = xyes])
++
+ modminer="no"
+ 
+ AC_ARG_ENABLE([modminer],
+@@ -390,7 +413,7 @@
+ 	])
+ fi
+ 
+-if test x$avalon$avalon2$bitforce$bitfury$modminer$bflsc$icarus$hashfast$hashratio$klondike$drillbit$cointerra$ants1$ants2 != xnononononononononononononono; then
++if test x$hexminers$avalon$avalon2$bitforce$bitfury$modminer$bflsc$icarus$hashfast$hashratio$klondike$drillbit$cointerra$ants1$ants2 != xnononononononononononononono; then
+ 	want_usbutils=true
+ else
+ 	want_usbutils=false
+@@ -575,7 +598,11 @@
+ 
+ echo "  curses.TUI...........: $cursesmsg"
+ 
+-
++if test "x$scrypt" != xno; then
++	echo "  scrypt...............: Enabled"
++else
++	echo "  scrypt...............: Disabled"
++fi
+ echo
+ if test "x$ants1" = xyes; then
+ 	echo "  Antminer.S1.Bitmain..: Enabled"
+@@ -613,6 +640,12 @@
+ 	echo "  BlackArrow.ASICs.....: Disabled"
+ fi
+ 
++if test "x$hexminers" = xyes; then
++	echo "  HEXSA2.ASICs.........: Enabled"
++else
++	echo "  HEXSA2.ASICs.........: Disabled"
++fi
++
+ if test "x$bflsc" = xyes; then
+ 	echo "  BFL.ASICs............: Enabled"
+ else
+@@ -699,7 +732,7 @@
+ 	echo "  ModMiner.FPGAs.......: Disabled"
+ fi
+ 
+-if test "x$avalon$avalon2$bab$bflsc$bitforce$bitfury$hashfast$hashratio$icarus$klondike$knc$modminer$drillbit$minion$cointerra$bitmine_A1$ants1$ants2$sp10$sp30" = xnononononononononononononononononononono; then
++if test "x$hexminers$avalon$avalon2$bab$bflsc$bitforce$bitfury$hashfast$hashratio$icarus$klondike$knc$modminer$drillbit$minion$cointerra$bitmine_A1$ants1$ants2$sp10$sp30" = xnononononononononononononononononononono; then
+ 	AC_MSG_ERROR([No mining configured in])
+ fi
+ 
+--- cg_o/Makefile.am	2014-09-22 14:22:33.000835508 +0300
++++ scrypt_cgminer/Makefile.am	2014-09-22 14:25:50.191914120 +0300
+@@ -42,6 +42,7 @@
+ 		   sha2.c sha2.h api.c
+ 
+ cgminer_SOURCES	+= logging.c
++cgminer_SOURCES += scrypt.c scrypt.h
+ 
+ cgminer_SOURCES	+= klist.h klist.c
+ 
+@@ -55,9 +56,9 @@
+ cgminer_SOURCES += usbutils.c usbutils.h
+ endif
+ 
+-if WANT_LIBBITFURY
+-cgminer_SOURCES += libbitfury.c libbitfury.h mcp2210.c mcp2210.h
+-endif
++#if WANT_LIBBITFURY
++#cgminer_SOURCES += libbitfury.c libbitfury.h mcp2210.c mcp2210.h
++#endif
+ 
+ if WANT_CRC16
+ cgminer_SOURCES += crc16.c crc.h
+@@ -150,6 +151,10 @@
+ cgminer_SOURCES += driver-bitmain.c driver-bitmain.h
+ endif
+ 
++if HAS_HEXMINERS
++cgminer_SOURCES += driver-hexminers.c driver-hexminers.h
++endif
++
+ if HAS_MODMINER
+ cgminer_SOURCES += driver-modminer.c
+ bitstreamsdir = $(bindir)/bitstreams
+--- cg_o/miner.h	2014-09-22 14:22:33.048838208 +0300
++++ scrypt_cgminer/miner.h	2014-09-22 14:25:50.191914120 +0300
+@@ -229,6 +229,7 @@
+ 	DRIVER_ADD_COMMAND(modminer)
+ 
+ #define ASIC_PARSE_COMMANDS(DRIVER_ADD_COMMAND) \
++	DRIVER_ADD_COMMAND(hexminers) \
+ 	DRIVER_ADD_COMMAND(ants1) \
+ 	DRIVER_ADD_COMMAND(ants2) \
+ 	DRIVER_ADD_COMMAND(avalon) \
+@@ -280,6 +281,13 @@
+ 	POOL_LOADBALANCE,
+ 	POOL_BALANCE,
+ };
++#if defined(USE_HEXMINERS)
++
++enum default_hex_miner {
++	D_HEXS,
++};
++extern enum default_hex_miner default_hex_miner;
++#endif
+ 
+ #define TOP_STRATEGY (POOL_BALANCE)
+ 
+@@ -597,6 +605,11 @@
+ 	dest[6] = src[1];
+ 	dest[7] = src[0];
+ }
++static inline void swap32yes(void*out, const void*in, size_t sz) {
++	size_t swapcounter = 0;
++	for (swapcounter = 0; swapcounter < sz; ++swapcounter)
++		(((uint32_t*)out)[swapcounter]) = swab32(((uint32_t*)in)[swapcounter]);
++}
+ 
+ static inline void swab256(void *dest_p, const void *src_p)
+ {
+@@ -1039,6 +1052,9 @@
+ extern int opt_minion_spiusec;
+ extern char *opt_minion_temp;
+ #endif
++#ifdef USE_HEXMINERS
++extern char *opt_hexminers_options;
++#endif
+ #ifdef USE_USBUTILS
+ extern char *opt_usb_select;
+ extern int opt_usbdump;
+@@ -1393,6 +1409,10 @@
+ 	struct timeval	tv_work_start;
+ 	struct timeval	tv_work_found;
+ 	char		getwork_mode;
++	
++#if defined(USE_HEXMINERS)
++	bool ping;
++#endif
+ };
+ 
+ #ifdef USE_MODMINER
+@@ -1440,6 +1460,9 @@
+ extern bool test_nonce(struct work *work, uint32_t nonce);
+ extern bool test_nonce_diff(struct work *work, uint32_t nonce, double diff);
+ extern bool submit_tested_work(struct thr_info *thr, struct work *work);
++#if defined(USE_HEXMINERS)
++extern bool submit_tested_work_fast_clone(struct thr_info *thr, struct work *work, bool diff1);
++#endif
+ extern bool submit_nonce(struct thr_info *thr, struct work *work, uint32_t nonce);
+ extern bool submit_noffset_nonce(struct thr_info *thr, struct work *work, uint32_t nonce,
+ 			  int noffset);
+--- cg_o/usbutils.c	2014-09-22 14:22:33.052838431 +0300
++++ scrypt_cgminer/usbutils.c	2014-09-22 14:25:50.191914120 +0300
+@@ -285,7 +285,15 @@
+ 	USB_EPS(0, kli0_epinfos)
+ };
+ #endif
+-
++#ifdef USE_HEXMINERS
++static struct usb_epinfo hexs_epinfos[] = {
++	{ LIBUSB_TRANSFER_TYPE_BULK,	64,	EPI(2), 0, 0 },
++	{ LIBUSB_TRANSFER_TYPE_BULK,	64,	EPO(2), 0, 0 }
++};
++static struct usb_intinfo hexs_ints[] = {
++	USB_EPS(1, hexs_epinfos)
++};
++#endif
+ #ifdef USE_ICARUS
+ static struct usb_epinfo ica_epinfos[] = {
+ 	{ LIBUSB_TRANSFER_TYPE_BULK,	64,	EPI(3), 0, 0 },
+@@ -535,6 +543,7 @@
+ 		.latency = LATENCY_UNUSED,
+ 		INTINFO(mmq_ints) },
+ #endif
++
+ #ifdef USE_AVALON
+ 	{
+ 		.drv = DRIVER_avalon,
+@@ -631,6 +640,20 @@
+ 		.latency = 10,
+ 		INTINFO(kli_ints) },
+ #endif
++#ifdef USE_HEXMINERS //04d8:000a 
++	{	 
++		.drv = DRIVER_hexminers,
++		.name = "HEXS",
++		.ident = IDENT_HEXS,
++		.idVendor = 0x04D8,
++		.idProduct = 0x000F,
++		.iProduct = NULL,
++		//.iProduct = "HEXSA1-CoinCraft ASIC Miner",
++		.config = 1,
++		.timeout = 100,
++		.latency = LATENCY_UNUSED,
++		 INTINFO(hexs_ints) },
++#endif
+ #ifdef USE_ICARUS
+ 	{
+ 		.drv = DRIVER_icarus,
+@@ -1057,7 +1080,6 @@
+ {
+ 	char tmp[512];
+ 	int err;
+-
+ 	err = libusb_set_configuration(handle, cd);
+ 	if (err) {
+ 		snprintf(tmp, sizeof(tmp), EOL "  ** dev %d: Failed to set config descriptor to %d, err %d",
+@@ -1142,6 +1164,7 @@
+ 	append(buf, tmp, off, len);
+ 
+ 	err = libusb_open(dev, &handle);
++	
+ 	if (err) {
+ 		snprintf(tmp, sizeof(tmp), EOL "  ** dev %d: Failed to open, err %d", (int)(*count), err);
+ 		append(buf, tmp, off, len);
+@@ -1924,7 +1947,6 @@
+ 
+ 	if (unlikely(!cgpu))
+ 		quit(1, "Failed to calloc cgpu for %s in usb_alloc_cgpu", drv->dname);
+-
+ 	cgpu->drv = drv;
+ 	cgpu->deven = DEV_ENABLED;
+ 	cgpu->threads = threads;
+@@ -1958,13 +1980,13 @@
+ 	struct libusb_config_descriptor *config = NULL;
+ 	const struct libusb_interface_descriptor *idesc;
+ 	const struct libusb_endpoint_descriptor *epdesc;
+-	unsigned char strbuf[STRBUFLEN+1];
++	//unsigned char strbuf[STRBUFLEN+1];
+ 	char devpath[32];
+ 	char devstr[STRBUFLEN+1];
+ 	int err, ifinfo, epinfo, alt, epnum, pstate;
+ 	int bad = USB_INIT_FAIL;
+ 	int cfg, claimed = 0;
+-
++  
+ 	DEVWLOCK(cgpu, pstate);
+ 
+ 	cgpu->usbinfo.bus_number = libusb_get_bus_number(dev);
+@@ -1999,13 +2021,7 @@
+ 	if (unlikely(!cgusb->descriptor))
+ 		quit(1, "USB failed to calloc _usb_init cgusb descriptor");
+ 
+-	err = libusb_get_device_descriptor(dev, cgusb->descriptor);
+-	if (err) {
+-		applog(LOG_DEBUG,
+-			"USB init failed to get descriptor, err %d %s",
+-			err, devstr);
+-		goto dame;
+-	}
++
+ 
+ 	cg_wlock(&cgusb_fd_lock);
+ 	err = libusb_open(dev, &(cgusb->handle));
+@@ -2035,6 +2051,14 @@
+ 		}
+ 		goto dame;
+ 	}
++	
++	err = libusb_get_device_descriptor(dev, cgusb->descriptor);
++	if (err) {
++		applog(LOG_ERR,
++			"USB init failed to get descriptor, err %d %s",
++			err, devstr);
++		goto nokernel;
++	}
+ 
+ #ifdef LINUX
+ 	for (ifinfo = 0; ifinfo < found->intinfo_count; ifinfo++) {
+@@ -2057,7 +2081,8 @@
+ 	}
+ #endif
+ 
+-	if (found->iManufacturer) {
++	if (found->iManufacturer)
++	 {
+ 		unsigned char man[STRBUFLEN+1];
+ 
+ 		err = libusb_get_string_descriptor_ascii(cgusb->handle,
+@@ -2079,17 +2104,30 @@
+ 	}
+ 
+ 	if (found->iProduct) {
+-		unsigned char prod[STRBUFLEN+1];
+-
+-		err = libusb_get_string_descriptor_ascii(cgusb->handle,
++		unsigned char prod[STRBUFLEN+1] = {0};
++   err = -9;
++		if(cgusb->descriptor->iProduct) 
++				err = libusb_get_string_descriptor_ascii(cgusb->handle,
+ 							 cgusb->descriptor->iProduct,
+-							 prod, STRBUFLEN);
++							 (unsigned char *)prod, 127);
+ 		if (err < 0) {
++		
++		#if defined(USE_HEXMINERS)
++      #if defined(USE_HEXMINERS)
++			if(found->ident == IDENT_HEXS && default_hex_miner == D_HEXS) {
++				snprintf((char *)prod, sizeof(prod), "HEXSA1-CoinCraft ASIC Miner");
++			} 
++			#endif
++		#else
++			
+ 			applog(LOG_DEBUG,
+ 				"USB init, failed to get iProduct, err %d %s",
+ 				err, devstr);
+ 			goto cldame;
++		#endif
++			
+ 		}
++	
+ 		if (strcmp((char *)prod, found->iProduct)) {
+ 			applog(LOG_DEBUG, "USB init, iProduct mismatch %s",
+ 			       devstr);
+@@ -2097,6 +2135,9 @@
+ 			bad = USB_INIT_IGNORE;
+ 			goto cldame;
+ 		}
++		cgusb->prod_string = strdup((char *)prod);
++	} else {
++		cgusb->prod_string = (char *)BLANK;
+ 	}
+ 
+ 	cfg = -1;
+@@ -2184,12 +2225,12 @@
+ 		else {
+ 			switch(err) {
+ 				case LIBUSB_ERROR_BUSY:
+-					applog(LOG_WARNING,
++					applog(LOG_ERR,
+ 						"USB init, claim ifinfo %d interface %d in use %s",
+ 						ifinfo, THISIF(found, ifinfo), devstr);
+ 					break;
+ 				default:
+-					applog(LOG_DEBUG,
++					applog(LOG_ERR,
+ 						"USB init, claim ifinfo %d interface %d failed,"
+ 						" err %d %s",
+ 						ifinfo, THISIF(found, ifinfo), err, devstr);
+@@ -2203,7 +2244,7 @@
+ 	if (err)
+ 		cfg = -1;
+ 	if (cfg != found->config) {
+-		applog(LOG_WARNING,
++		applog(LOG_ERR,
+ 			"USB init, incorrect config (%d!=%d) after claim of %s",
+ 			cfg, found->config, devstr);
+ 		goto reldame;
+@@ -2218,25 +2259,8 @@
+ // TODO: allow this with the right version of the libusb include and running library
+ //	cgusb->speed = libusb_get_device_speed(dev);
+ 
+-	err = libusb_get_string_descriptor_ascii(cgusb->handle,
+-				cgusb->descriptor->iProduct, strbuf, STRBUFLEN);
+-	if (err > 0)
+-		cgusb->prod_string = strdup((char *)strbuf);
+-	else
+-		cgusb->prod_string = (char *)BLANK;
+-
+-	err = libusb_get_string_descriptor_ascii(cgusb->handle,
+-				cgusb->descriptor->iManufacturer, strbuf, STRBUFLEN);
+-	if (err > 0)
+-		cgusb->manuf_string = strdup((char *)strbuf);
+-	else
+ 		cgusb->manuf_string = (char *)BLANK;
+ 
+-	err = libusb_get_string_descriptor_ascii(cgusb->handle,
+-				cgusb->descriptor->iSerialNumber, strbuf, STRBUFLEN);
+-	if (err > 0)
+-		cgusb->serial_string = strdup((char *)strbuf);
+-	else
+ 		cgusb->serial_string = (char *)BLANK;
+ 
+ // TODO: ?
+@@ -2281,11 +2305,13 @@
+ 	cgusb->handle = NULL;
+ 	cg_wunlock(&cgusb_fd_lock);
+ 
+-dame:
+ 
+ 	if (config)
+ 		libusb_free_config_descriptor(config);
+ 
++dame:
++
++
+ 	cgusb = free_cgusb(cgusb);
+ 
+ out_unlock:
+@@ -2453,7 +2479,7 @@
+ 				drv->dname, drv_count[drv->drv_id].limit);
+ 			break;
+ 		}
+-
++    
+ 		found = usb_check(drv, list[i]);
+ 		if (found != NULL) {
+ 			bool new_dev = false;
+@@ -3581,6 +3607,7 @@
+ 	for (i = 0; i < total_devices; i++) {
+ 		cgpu = devices[i];
+ 		switch (cgpu->drv->drv_id) {
++			case DRIVER_hexminers:
+ 			case DRIVER_bflsc:
+ 			case DRIVER_bitforce:
+ 			case DRIVER_bitfury:
+--- cg_o/usbutils.h	2014-09-22 14:22:33.052838431 +0300
++++ scrypt_cgminer/usbutils.h	2014-09-22 14:25:50.191914120 +0300
+@@ -137,6 +137,7 @@
+ 	IDENT_AMU,
+ 	IDENT_ANT,
+ 	IDENT_ANU,
++	IDENT_HEXS,
+ 	IDENT_AS2,
+ 	IDENT_AVA,
+ 	IDENT_AV2,
+@@ -577,5 +578,5 @@
+ 
+ #define usb_transfer_read(cgpu, typ, req, val, idx, buf, bufsiz, read, cmd) \
+ 	_usb_transfer_read(cgpu, typ, req, val, idx, buf, bufsiz, read, DEVTIMEOUT, cmd)
+-
++	
+ #endif
+--- cg_o/util.c	2014-09-22 14:22:33.052838431 +0300
++++ scrypt_cgminer/util.c	2014-09-22 14:25:50.195914344 +0300
+@@ -874,6 +874,49 @@
+ 	return ret;
+ }
+ 
++bool fulltestsg(const unsigned char *hash, const unsigned char *target)
++{
++	uint32_t *hash32 = (uint32_t *)hash;
++	uint32_t *target32 = (uint32_t *)target;
++	bool rc = true;
++	int i;
++
++	for (i = 28 / 4; i >= 0; i--) {
++		uint32_t h32tmp = le32toh(hash32[i]);
++		uint32_t t32tmp = le32toh(target32[i]);
++
++		if (h32tmp > t32tmp) {
++			rc = false;
++			break;
++		}
++		if (h32tmp < t32tmp) {
++			rc = true;
++			break;
++		}
++	}
++
++	if (opt_debug) {
++		unsigned char hash_swap[32], target_swap[32];
++		char *hash_str, *target_str;
++
++		swab256(hash_swap, hash);
++		swab256(target_swap, target);
++		hash_str = bin2hex(hash_swap, 32);
++		target_str = bin2hex(target_swap, 32);
++
++		applog(LOG_DEBUG, " Proof: %s\nTarget: %s\nTrgVal? %s",
++			hash_str,
++			target_str,
++			rc ? "YES (hash <= target)" :
++			     "no (false positive; hash > target)");
++
++		free(hash_str);
++		free(target_str);
++	}
++
++	return rc;
++}
++
+ bool fulltest(const unsigned char *hash, const unsigned char *target)
+ {
+ 	uint32_t *hash32 = (uint32_t *)hash;
+--- cg_o/api.c	2014-09-22 14:22:33.004835734 +0300
++++ scrypt_cgminer/api.c	2014-09-22 14:25:50.195914344 +0300
+@@ -25,8 +25,8 @@
+ #include "miner.h"
+ #include "util.h"
+ #include "klist.h"
+-
+-#if defined(USE_BFLSC) || defined(USE_AVALON) || defined(USE_AVALON2) || \
++#if defined(USE_HEXMINERS) || \
++	defined(USE_BFLSC) || defined(USE_AVALON) || defined(USE_AVALON2) || \
+ 	defined(USE_HASHFAST) || defined(USE_BITFURY) || defined(USE_KLONDIKE) || \
+ 	defined(USE_KNC) || defined(USE_BAB) || defined(USE_DRILLBIT) || \
+ 	defined(USE_MINION) || defined(USE_COINTERRA) || defined(USE_BITMINE_A1) || \
+@@ -40,7 +40,7 @@
+ #endif
+ 
+ // BUFSIZ varies on Windows and Linux
+-#define TMPBUFSIZ	8192
++#define TMPBUFSIZ	8192 * 8
+ 
+ // Number of requests to queue - normally would be small
+ // However lots of PGA's may mean more
+@@ -188,6 +188,9 @@
+ #ifdef USE_BITMINE_A1
+ 			"BA1 "
+ #endif
++#ifdef USE_HEXMINERS
++			"HEXS "
++#endif
+ #ifdef USE_ICARUS
+ 			"ICA "
+ #endif
+@@ -1523,12 +1526,14 @@
+ 
+ #if LOCK_TRACKING
+ 
++FILE * pFile;
++
+ #define LOCK_FMT_FFL " - called from %s %s():%d"
+ 
+-#define LOCKMSG(fmt, ...)	fprintf(stderr, "APILOCK: " fmt "\n", ##__VA_ARGS__)
+-#define LOCKMSGMORE(fmt, ...)	fprintf(stderr, "          " fmt "\n", ##__VA_ARGS__)
+-#define LOCKMSGFFL(fmt, ...) fprintf(stderr, "APILOCK: " fmt LOCK_FMT_FFL "\n", ##__VA_ARGS__, file, func, linenum)
+-#define LOCKMSGFLUSH() fflush(stderr)
++#define LOCKMSG(fmt, ...)	fprintf(pFile, "APILOCK: " fmt "\n", ##__VA_ARGS__)
++#define LOCKMSGMORE(fmt, ...)	fprintf(pFile, "          " fmt "\n", ##__VA_ARGS__)
++#define LOCKMSGFFL(fmt, ...) fprintf(pFile, "APILOCK: " fmt LOCK_FMT_FFL "\n", ##__VA_ARGS__, file, func, linenum)
++#define LOCKMSGFLUSH() fflush(pFile)
+ 
+ typedef struct lockstat {
+ 	uint64_t lock_id;
+@@ -1886,6 +1891,7 @@
+ 
+ void show_locks()
+ {
++	pFile = fopen ("/tmp/cglocks","w");
+ 	LOCKLIST *list;
+ 
+ 	locklock();
+@@ -1905,6 +1911,8 @@
+ 	LOCKMSGFLUSH();
+ 
+ 	lockunlock();
++	fclose (pFile);
++
+ }
+ #endif
+ 
+@@ -2687,6 +2695,8 @@
+ 	}
+ 
+ 	pool = pools[id];
++	if (pool->enabled == POOL_DISABLED)
++		enabled_pools++;
+ 	pool->enabled = POOL_ENABLED;
+ 	cg_runlock(&control_lock);
+ 	switch_pools(pool);
+@@ -2804,7 +2814,7 @@
+ 		message(io_data, MSG_ALRENAP, id, NULL, isjson);
+ 		return;
+ 	}
+-
++  enabled_pools++;
+ 	pool->enabled = POOL_ENABLED;
+ 	if (pool->prio < current_pool()->prio)
+ 		switch_pools(pool);
+@@ -2953,7 +2963,8 @@
+ 		message(io_data, MSG_DISLASTP, id, NULL, isjson);
+ 		return;
+ 	}
+-
++	enabled_pools--;
++  if (pool->enabled == POOL_ENABLED) enabled_pools--;
+ 	pool->enabled = POOL_DISABLED;
+ 	if (pool == current_pool())
+ 		switch_pools(NULL);
+@@ -3197,14 +3208,38 @@
+ {
+ 	struct api_data *root = NULL;
+ 
++  #if defined(USE_HEXMINERS)
++	char *enabled;
++	char *status;
++  char *is_hex = NULL;
++  
++  is_hex = strstr(id, "HEX");
++  #endif
+ 	root = api_add_int(root, "STATS", &i, false);
+ 	root = api_add_string(root, "ID", id, false);
++	#if defined(USE_HEXMINERS)
++	if(is_hex && cgpu) {
++		if (cgpu->deven != DEV_DISABLED)
++				enabled = (char *)YES;
++			else
++				enabled = (char *)NO;
++		
++		  status = (char *)status2str(cgpu->status);
++			root = api_add_string(root, "Enabled", enabled, false);
++			root = api_add_string(root, "Status", status, false);
++	}
++	#endif
+ 	root = api_add_elapsed(root, "Elapsed", &(total_secs), false);
++	#if defined(USE_HEXMINERS)
++	if(is_hex == NULL) {
++	#endif
+ 	root = api_add_uint32(root, "Calls", &(stats->getwork_calls), false);
+ 	root = api_add_timeval(root, "Wait", &(stats->getwork_wait), false);
+ 	root = api_add_timeval(root, "Max", &(stats->getwork_wait_max), false);
+ 	root = api_add_timeval(root, "Min", &(stats->getwork_wait_min), false);
+-
++  #if defined(USE_HEXMINERS)
++	} 
++	#endif
+ 	if (pool_stats) {
+ 		root = api_add_uint32(root, "Pool Calls", &(pool_stats->getwork_calls), false);
+ 		root = api_add_uint32(root, "Pool Attempts", &(pool_stats->getwork_attempts), false);
+@@ -3234,6 +3269,10 @@
+ 
+ 	if (cgpu) {
+ #ifdef USE_USBUTILS
++	#if defined(USE_HEXMINERS)
++	if(is_hex == NULL) {
++	#endif
++	
+ 		char details[256];
+ 
+ 		if (cgpu->usbinfo.pipe_count)
+@@ -3287,6 +3326,10 @@
+ 		}
+ 
+ 		root = api_add_string(root, "USB tmo", details, true);
++ #if defined(USE_HEXMINERS)
++	}
++ #endif
++	
+ #endif
+ 	}
+ 
+@@ -5004,7 +5047,11 @@
+ 										break;
+ 									}
+ 								}
++	#if LOCK_TRACKING
++	if (ISPRIVGROUP(group) || strstr(COMMANDS(group), cmdbuf) || 1)
++	#else
+ 								if (ISPRIVGROUP(group) || strstr(COMMANDS(group), cmdbuf))
++	#endif
+ 									(cmds[i].func)(io_data, c, param, isjson, group);
+ 								else {
+ 									message(io_data, MSG_ACCDENY, 0, cmds[i].name, isjson);
+--- cg_o/hubpower.c	1970-01-01 02:00:00.000000000 +0200
++++ scrypt_cgminer/hubpower.c	2014-09-22 14:25:50.195914344 +0300
+@@ -0,0 +1,280 @@
++/* hubpower -- control the power settings for a USB hub
++ *
++ * To build: gcc -o hubpower hubpower.c
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++//#include <strings.h>
++#include <string.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <sys/ioctl.h>
++
++#include <asm/byteorder.h>
++#include <linux/usbdevice_fs.h>
++#include <linux/usb/ch9.h>
++
++#define USB_HUB_TIMEOUT     5000    /* milliseconds */
++#define USB_PORT_FEAT_POWER 8
++
++#define USB_DT_HUB      (USB_TYPE_CLASS | 0x09)
++#define USB_DT_HUB_SIZE     7
++
++struct usb_hub_descriptor {
++    __u8  bDescLength;
++    __u8  bDescriptorType;
++    __u8  bNbrPorts;
++    __le16 wHubCharacteristics;
++    __u8  bPwrOn2PwrGood;
++    __u8  bHubContrCurrent;
++} __attribute__ ((packed));
++
++struct usb_port_status {
++    __le16 wPortStatus;
++    __le16 wPortChange;
++} __attribute__ ((packed));
++
++#define USB_PORT_STAT_CONNECTION    0x0001
++#define USB_PORT_STAT_ENABLE        0x0002
++#define USB_PORT_STAT_SUSPEND       0x0004
++#define USB_PORT_STAT_OVERCURRENT   0x0008
++#define USB_PORT_STAT_RESET     0x0010
++#define USB_PORT_STAT_L1        0x0020
++/* bits 6 to 7 are reserved */
++#define USB_PORT_STAT_POWER     0x0100
++#define USB_PORT_STAT_LOW_SPEED     0x0200
++#define USB_PORT_STAT_HIGH_SPEED        0x0400
++#define USB_PORT_STAT_TEST              0x0800
++#define USB_PORT_STAT_INDICATOR         0x1000
++#define USB_PORT_STAT_POWER_3       0x0200  /* USB 3.0 */
++
++
++int fd;     /* Hub device file */
++int usb_level;
++
++
++void usage(void)
++{
++    fprintf(stderr, "Usage:"
++        "\thubpower busnum:devnum power {portnum (on|off)} ...\n"
++        "\thubpower busnum:devnum status\n"
++        "\thubpower busnum:devnum bind\n"
++        );
++    exit(1);
++}
++
++void port_status(int portnum)
++{
++    struct usbdevfs_ctrltransfer ctrl;
++    struct usb_port_status pstat;
++    int rc;
++
++    ctrl.bRequestType = USB_DIR_IN | USB_TYPE_CLASS |
++            USB_RECIP_OTHER;
++    ctrl.bRequest = USB_REQ_GET_STATUS;
++    ctrl.wValue = 0;
++    ctrl.wIndex = portnum;
++    ctrl.wLength = sizeof(pstat);
++    ctrl.timeout = USB_HUB_TIMEOUT;
++    ctrl.data = &pstat;
++    rc = ioctl(fd, USBDEVFS_CONTROL, &ctrl);
++    if (rc == -1) {
++        fprintf(stderr, "Error in ioctl "
++            "(get port %d status): %s\n",
++            portnum, strerror(errno));
++        return;
++    }
++
++    printf("Port %2d status: %04x ", portnum, pstat.wPortStatus);
++
++    if (usb_level <= 2) {
++        if (pstat.wPortStatus & USB_PORT_STAT_INDICATOR)
++            printf(" Indicator");
++        if (pstat.wPortStatus & USB_PORT_STAT_TEST)
++            printf(" Test-Mode");
++        if (pstat.wPortStatus & USB_PORT_STAT_HIGH_SPEED)
++            printf(" High-Speed");
++        if (pstat.wPortStatus & USB_PORT_STAT_LOW_SPEED)
++            printf(" Low-Speed");
++        if (pstat.wPortStatus & USB_PORT_STAT_POWER)
++            printf(" Power-On");
++        else
++            printf(" Power-Off");
++    } else if (usb_level == 3) {
++        if (pstat.wPortStatus & USB_PORT_STAT_POWER_3)
++            printf(" Power-On");
++        else
++            printf(" Power-Off");
++    }
++
++    if (pstat.wPortStatus & USB_PORT_STAT_RESET)
++        printf(" Resetting");
++    if (pstat.wPortStatus & USB_PORT_STAT_OVERCURRENT)
++        printf(" Overcurrent");
++    if (pstat.wPortStatus & USB_PORT_STAT_SUSPEND)
++        printf(" Suspended");
++    if (pstat.wPortStatus & USB_PORT_STAT_ENABLE)
++        printf(" Enabled");
++    if (pstat.wPortStatus & USB_PORT_STAT_CONNECTION)
++        printf(" Connected");
++
++    printf("\n");
++}
++
++int main(int argc, char **argv)
++{
++    int busnum, devnum, numports;
++    enum {DO_POWER, DO_STATUS, DO_BIND} action;
++    char fname1[40], fname2[40];
++    int rc;
++    int portnum;
++    struct usb_device_descriptor dev_descr;
++    struct usb_hub_descriptor hub_descr;
++    struct usbdevfs_ctrltransfer ctrl;
++    struct usbdevfs_ioctl usb_ioctl;
++    int bus_endian;
++
++    if (argc < 3)
++        usage();
++    if (sscanf(argv[1], "%d:%d", &busnum, &devnum) != 2 ||
++            busnum <= 0 || busnum > 255 ||
++            devnum <= 0 || devnum > 255)
++        usage();
++
++    if (strcmp(argv[2], "power") == 0) {
++        action = DO_POWER;
++        if ((argc - 3) % 2 != 0)
++            usage();
++    } else if (strcmp(argv[2], "status") == 0) {
++        action = DO_STATUS;
++        if (argc != 3)
++            usage();
++    } else if (strcmp(argv[2], "bind") == 0) {
++        action = DO_BIND;
++        if (argc != 3)
++            usage();
++    } else {
++        usage();
++    }
++
++    sprintf(fname1, "/dev/bus/usb/%03d/%03d", busnum, devnum);
++    sprintf(fname2, "/proc/bus/usb/%03d/%03d", busnum, devnum);
++
++    bus_endian = 1;
++    fd = open(fname1, O_RDWR);
++    if (fd < 0) {
++        int err1 = errno;
++
++        bus_endian = 0;
++        fd = open(fname2, O_RDWR);
++        if (fd < 0) {
++            fprintf(stderr, "Unable to open device file %s: %s\n",
++                    fname1, strerror(err1));
++            fprintf(stderr, "Unable to open device file %s: %s\n",
++                    fname2, strerror(errno));
++            return 1;
++        }
++    }
++
++    rc = read(fd, &dev_descr, USB_DT_DEVICE_SIZE);
++    if (rc != USB_DT_DEVICE_SIZE) {
++        perror("Error reading device descriptor");
++        return 1;
++    }
++    if (dev_descr.bDeviceClass != USB_CLASS_HUB) {
++        fprintf(stderr, "Device %d:%d is not a hub\n",
++                busnum, devnum);
++        return 1;
++    }
++    if (bus_endian) {
++        dev_descr.bcdUSB = __le16_to_cpu(dev_descr.bcdUSB);
++    }
++    usb_level = dev_descr.bcdUSB >> 8;
++
++    ctrl.bRequestType = USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_DEVICE;
++    ctrl.bRequest = USB_REQ_GET_DESCRIPTOR;
++    ctrl.wValue = USB_DT_HUB << 8;
++    ctrl.wIndex = 0;
++    ctrl.wLength = USB_DT_HUB_SIZE;
++    ctrl.timeout = USB_HUB_TIMEOUT;
++    ctrl.data = &hub_descr;
++    rc = ioctl(fd, USBDEVFS_CONTROL, &ctrl);
++    if (rc == -1) {
++        perror("Error in ioctl (read hub descriptor)");
++        return 1;
++    }
++    numports = hub_descr.bNbrPorts;
++
++    if (action == DO_STATUS) {
++        for (portnum = 1; portnum <= numports; ++portnum)
++            port_status(portnum);
++        return 0;
++    }
++
++    if (action == DO_BIND) {
++        usb_ioctl.ifno = 0;
++        usb_ioctl.ioctl_code = USBDEVFS_CONNECT;
++        usb_ioctl.data = NULL;
++        rc = ioctl(fd, USBDEVFS_IOCTL, &usb_ioctl);
++        if (rc == -1) {
++            perror("Error in ioctl (USBDEVFS_CONNECT)");
++            return 1;
++        }
++        printf("Bind-driver request sent to the kernel\n");
++        return 0;
++    }
++
++    if (action == DO_POWER) {
++        int i;
++
++        usb_ioctl.ifno = 0;
++        usb_ioctl.ioctl_code = USBDEVFS_DISCONNECT;
++        usb_ioctl.data = NULL;
++        rc = ioctl(fd, USBDEVFS_IOCTL, &usb_ioctl);
++        if (rc == -1 && errno != ENODATA) {
++            perror("Error in ioctl (USBDEVFS_DISCONNECT)");
++            return 1;
++        }
++
++        for (i = 3; i < argc; i += 2) {
++            portnum = atoi(argv[i]);
++            if (portnum < 1 || portnum > numports) {
++                fprintf(stderr, "Invalid port number: %d\n",
++                        portnum);
++                continue;
++            }
++
++            if (strcmp(argv[i+1], "on") == 0)
++                ctrl.bRequest = USB_REQ_SET_FEATURE;
++            else if (strcmp(argv[i+1], "off") == 0)
++                ctrl.bRequest = USB_REQ_CLEAR_FEATURE;
++            else {
++                fprintf(stderr, "Invalid port power level: %s\n)",
++                        argv[i+1]);
++                continue;
++            }
++
++            ctrl.bRequestType = USB_DIR_OUT | USB_TYPE_CLASS |
++                    USB_RECIP_OTHER;
++            ctrl.wValue = USB_PORT_FEAT_POWER;
++            ctrl.wIndex = portnum;
++            ctrl.wLength = 0;
++            ctrl.timeout = USB_HUB_TIMEOUT;
++            ctrl.data = NULL;
++            rc = ioctl(fd, USBDEVFS_CONTROL, &ctrl);
++            if (rc == -1) {
++                fprintf(stderr, "Error in ioctl "
++                    "(set/clear port %d feature): %s\n",
++                    portnum, strerror(errno));
++                continue;
++            }
++
++            port_status(portnum);
++        }
++    }
++    return 0;
++}
++
++
+--- cg_o/driver-hexminers.c	1970-01-01 02:00:00.000000000 +0200
++++ scrypt_cgminer/driver-hexminers.c	2014-09-22 14:25:50.195914344 +0300
+@@ -0,0 +1,506 @@
++/*$T indentinput.c GC 1.140 10/16/13 10:19:47 */
++#include "config.h"
++#include <limits.h>
++#include <pthread.h>
++#include <stdio.h>
++#include <sys/time.h>
++#include <sys/types.h>
++#include <ctype.h>
++#include <dirent.h>
++#include <math.h>
++#include <unistd.h>
++#ifndef WIN32
++#include <sys/select.h>
++#include <termios.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#ifndef O_CLOEXEC
++#define O_CLOEXEC 0
++#endif
++#else
++#include "compat.h"
++#include <windows.h>
++#include <io.h>
++#endif
++#include "elist.h"
++#include "miner.h"
++#include "usbutils.h"
++#include "driver-hexminers.h"
++#include "util.h"
++extern unsigned int work_block;
++extern bool stale_work (struct work *work, bool share);
++extern void inc_hw_errors_hexs (struct thr_info *thr, int diff);
++extern struct work *copy_work_noffset_fast_no_id (struct work *base_work,
++                                                  int noffset);
++struct device_drv hexminers_drv;
++extern bool no_work;
++int opt_hexminers_chip_mask = 0xFF;
++int opt_hexminers_set_config_diff_to_one = 1;
++int opt_hexminers_core_voltage = HEXS_DEFAULT_CORE_VOLTAGE;
++#include "libhexs.c"
++
++static int
++hexminers_send_task (struct hexminers_task *ht, struct cgpu_info *hexminers)
++{
++  int ret = 0;
++  size_t nr_len = HEXMINERS_TASK_SIZE;
++  struct hexminers_info *info;
++  info = hexminers->device_data;
++  libhexs_csum (&ht->startbyte, &ht->csum, &ht->csum);
++  ret = libhexs_sendHashData (hexminers, &ht->startbyte, nr_len);
++  if (ret != nr_len)
++    {
++      libhexs_reset (hexminers);
++      info->usb_w_errors++;
++      return -1;
++    }
++  return ret;
++}
++
++static inline void
++hexminers_create_task (bool reset_work, struct hexminers_task *ht,
++                       struct work *work, bool diff1,
++                       uint32_t * asic_difficulty, double *cached_diff,
++                       uint32_t asic_difficulty_one)
++{
++  memcpy (ht->bheader, work->data, 80);
++  ht->id = htole16 ((uint16_t) work->subid);
++  if (reset_work)
++    ht->status = htole16 ((uint16_t) HEXS_STAT_NEW_WORK_CLEAR_OLD);
++  else
++    ht->status = htole16 ((uint16_t) HEXS_STAT_NEW_WORK);
++  if (work->ping || work->work_difficulty <= (double) 1)
++    {
++      ht->difficulty = asic_difficulty_one;
++      work->ping = 1;
++      return;
++    }
++  if (*cached_diff != work->work_difficulty)
++    {
++      *cached_diff = work->work_difficulty;
++      *asic_difficulty =
++        be32toh (libhexs_get_target
++                 ((double) 1 / (double) 65536 * work->work_difficulty));
++      ht->difficulty = *asic_difficulty;
++      return;
++    }
++}
++
++static inline void
++hexminers_init_task_c (struct hexminers_config_task *htc,
++                       struct hexminers_info *info)
++{
++  htc->startbyte = 0x53;
++  htc->datalength =
++    (uint8_t) ((sizeof (struct hexminers_config_task) - 6) / 2);
++  htc->command = 0x57;
++  htc->address = htole16 (0x3100);
++  htc->hashclock = htole16 ((uint16_t) info->frequency);
++  libhexs_setvoltage (info->core_voltage, &htc->refvoltage);
++  htc->difficulty = info->asic_difficulty_one;
++  htc->chip_mask = (uint8_t) info->chip_mask;
++  libhexs_csum (&htc->startbyte, &htc->csum, &htc->csum);
++}
++
++static inline void
++hexminers_init_task (struct hexminers_task *ht, struct hexminers_info *info)
++{
++  ht->startbyte = 0x53;
++  ht->datalength = (uint8_t) ((HEXMINERS_TASK_SIZE - 6) / 2);
++  ht->command = 0x57;
++  ht->address = htole16 (0x3080);
++  ht->difficulty = info->asic_difficulty_one;
++  ht->endNonce = 0xFFFFFFFF;
++}
++
++static struct cgpu_info *
++hexminers_detect_one (libusb_device * dev, struct usb_find_devices *found)
++{
++  int asic_count, frequency;
++  struct hexminers_info *info;
++  struct cgpu_info *hexminers;
++  bool configured = false;
++  int i = 0;
++  hexminers = usb_alloc_cgpu (&hexminers_drv, HEXS_MINER_THREADS);
++  if (!usb_init (hexminers, dev, found))
++    {
++      usb_uninit (hexminers);
++      return NULL;
++    }
++  hexminers->device_data = calloc (sizeof (struct hexminers_info), 1);
++  if (unlikely (!(hexminers->device_data)))
++    {
++      hexminers->device_data = NULL;
++      usb_uninit (hexminers);
++      return NULL;
++    }
++    
++  if (opt_hexminers_options != NULL)
++  	configured = (sscanf(opt_hexminers_options, "%d:%d", &asic_count, &frequency) == 2);
++  if (opt_hexminers_core_voltage < HEXS_MIN_COREMV
++     || opt_hexminers_core_voltage > HEXS_MAX_COREMV)
++   	{
++     	applog
++       	(LOG_ERR, "Invalid hexminers-voltage %d must be %dmV - %dmV",
++        	opt_hexminers_core_voltage, HEXS_MIN_COREMV, HEXS_MAX_COREMV);
++     	free (hexminers->device_data);
++     	hexminers->device_data = NULL;
++     	usb_uninit (hexminers);
++     	return NULL;
++   	}  
++  info = hexminers->device_data;
++  info->hexworks = calloc (sizeof (struct work *), HEXMINERS_ARRAY_SIZE);
++  if (unlikely (!(info->hexworks)))
++    {
++      free (hexminers->device_data);
++      hexminers->device_data = NULL;
++      usb_uninit (hexminers);
++      return NULL;
++    }
++  info->wr = (struct work8_result *) malloc (sizeof (struct work8_result));
++  info->readbuf = calloc (HEXS_HASH_BUF_SIZE, sizeof (unsigned char));
++  info->hash_read_pos = 0;
++  info->hash_write_pos = 0;
++  info->shut_read = false;
++  info->shut_write = false;
++  info->shut_reset = false;
++  info->work = NULL;
++  info->cached_diff = -1;
++  info->miner_count = HEXS_DEFAULT_MINER_NUM;
++  info->asic_count = HEXS_DEFAULT_ASIC_NUM;
++  info->frequency = HEXS_DEFAULT_FREQUENCY;
++  info->pic_voltage_readings = HEXS_DEFAULT_CORE_VOLTAGE;
++  info->core_voltage = opt_hexminers_core_voltage;
++  info->chip_mask = opt_hexminers_chip_mask;
++  info->diff1 = (bool) opt_hexminers_set_config_diff_to_one;
++  info->wr->buf_empty_space = 63;
++  info->work_block_local = work_block;
++  info->reset_work = true;
++  info->roll = 0;
++  info->asic_difficulty_one =
++    be32toh (libhexs_get_target ((double) 1 / (double) 65536));
++  info->asic_difficulty = info->asic_difficulty_one;
++  info->ht = calloc (sizeof (struct hexminers_task), 1);
++  hexminers_init_task (info->ht, info);
++  if (configured)
++    {
++      info->asic_count = asic_count;
++      info->frequency = frequency;
++    }
++  while (i < HEXMINERS_ARRAY_SIZE)
++    {
++      info->hexworks[i] = calloc (1, sizeof (struct work));
++      info->hexworks[i]->pool = NULL;
++      i++;
++    }
++  if (!add_cgpu (hexminers))
++    {
++      free (info->hexworks);
++      free (hexminers->device_data);
++      hexminers->device_data = NULL;
++      hexminers = usb_free_cgpu (hexminers);
++      usb_uninit (hexminers);
++      return NULL;
++    }
++  return hexminers;
++}
++
++static void
++hexminers_detect (bool __maybe_unused hotplug)
++{
++  usb_detect (&hexminers_drv, hexminers_detect_one);
++}
++
++static void
++do_hexminers_close (struct thr_info *thr)
++{
++  struct cgpu_info *hexminers = thr->cgpu;
++  struct hexminers_info *info = hexminers->device_data;
++  int i = 0;
++  while (i < HEXMINERS_ARRAY_SIZE)
++    {
++      free_work (info->hexworks[i]);
++      i++;
++    }
++  free (info->hexworks);
++  free (info->readbuf);
++  free (info->wr);
++  free (info->ht);
++  if (info->work)
++    free_work (info->work);
++}
++
++static void
++hexminers_shutdown (struct thr_info *thr)
++{
++  struct cgpu_info *hexminers = thr->cgpu;
++  do_hexminers_close (thr);
++  usb_nodev (hexminers);
++}
++
++static bool
++hexminers_thread_init (struct thr_info *thr)
++{
++  struct cgpu_info *hexminers = thr->cgpu;
++  struct hexminers_info *info = hexminers->device_data;
++  info->thr = thr;
++  struct hexminers_config_task *htc;
++  htc = calloc (sizeof (struct hexminers_config_task), 1);
++  hexminers_init_task_c (htc, info);
++  int ret = libhexs_sendHashData (hexminers, &htc->startbyte,
++                                  sizeof (struct hexminers_config_task));
++  if (ret != sizeof (struct hexminers_config_task))
++    applog (LOG_ERR, "HEXs %i Send config failed", hexminers->device_id);
++  free (htc);
++  return true;
++}
++
++static bool
++stale_ltcwork (struct work *ltcwork, bool bench, double cached_diff,
++               bool * reset_work)
++{
++  if (stale_work (ltcwork, bench) || ltcwork->sdiff != ltcwork->pool->sdiff)
++    {
++      *reset_work = true;
++      return true;
++    }
++  return false;
++}
++
++static void
++do_write_hexs (struct thr_info *thr)
++{
++  struct cgpu_info *hexminers = thr->cgpu;
++  struct hexminers_info *info = hexminers->device_data;
++  struct work *tmpwork = NULL;
++  int jobs_to_send = 8;
++  int send_jobs, ret;
++  send_jobs = 0;
++  if (info->work)
++    stale_ltcwork (info->work, false, info->cached_diff, &info->reset_work);
++  while (!libhexs_usb_dead (hexminers)
++         && ((info->work_block_local != work_block)
++             || (info->wr->buf_empty_space > 40 && send_jobs < jobs_to_send)
++             || info->reset_work))
++    {
++    again:
++      if (!info->work)
++        {
++          info->roll = 0;
++          info->work = get_work (thr, thr->id);
++          info->work->ping = info->diff1;
++          if (info->work_block_local != work_block)
++            {
++              info->reset_work = true;
++              info->work_block_local = work_block;
++            }
++        }
++      if (stale_ltcwork
++          (info->work, false, info->cached_diff, &info->reset_work))
++        {
++          free_work (info->work);
++          info->work = NULL;
++          goto again;
++        }
++      if (info->write_pos >= HEXMINERS_ARRAY_SIZE_REAL || info->reset_work)
++        info->write_pos = 0;
++      info->work->subid = info->write_pos;
++      tmpwork = copy_work_noffset_fast_no_id (info->work, info->roll++);
++      hexminers_create_task (info->reset_work, info->ht, tmpwork, info->diff1,
++                             &info->asic_difficulty, &info->cached_diff,
++                             info->asic_difficulty_one);
++      free_work (info->hexworks[info->write_pos]);
++      info->hexworks[info->write_pos] = tmpwork;
++      if (info->work->drv_rolllimit)
++        {
++          info->work->drv_rolllimit--;
++        }
++      else
++        {
++          free_work (info->work);
++          info->work = NULL;
++        }
++      ret = hexminers_send_task (info->ht, hexminers);
++      info->write_pos++;
++      send_jobs++;
++      if (ret == HEXMINERS_TASK_SIZE && info->reset_work)
++        {
++          info->reset_work = false;
++          info->wr->buf_empty_space = 63;
++          send_jobs -= 8;
++        }
++    }
++}
++
++static int64_t
++hexminers_scanhash (struct thr_info *thr)
++{
++  struct cgpu_info *hexminers = thr->cgpu;
++  struct hexminers_info *info = hexminers->device_data;
++  uint32_t nonce;
++  double found;
++  double hash_count = 0;
++  int ret_r = 0;
++  int64_t rethash_count = 0;
++  if (libhexs_usb_dead (hexminers))
++    {
++      hexminers->shutdown = true;
++      return -1;
++    }
++  do_write_hexs (thr);
++  if (libhexs_usb_dead (hexminers))
++    {
++      hexminers->shutdown = true;
++      return -1;
++    }
++  if (info->hash_write_pos + HEXS_USB_R_SIZE > HEXS_HASH_BUF_SIZE_OK)
++    {
++      info->hash_write_pos = info->hash_write_pos - info->hash_read_pos;
++      memcpy (info->readbuf, info->readbuf + info->hash_read_pos,
++              info->hash_write_pos);
++      info->hash_read_pos = 0;
++    }
++  if (info->hash_write_pos - info->hash_read_pos > 7)
++    {
++    again:
++      ret_r =
++        libhexs_eatHashData (info->wr, info->readbuf, &info->hash_read_pos,
++                             &info->hash_write_pos);
++      if (ret_r > HEXS_BUF_DATA)
++        goto out;
++      if (info->wr->datalength == 1)
++        goto done;
++      if (info->wr->lastnonceid > HEXMINERS_ARRAY_SIZE_REAL)
++        info->wr->lastnonceid = 0;
++      if (info->wr->lastchippos >= HEXS_DEFAULT_ASIC_NUM)
++        info->wr->lastchippos = 7;
++      {
++        nonce = info->wr->lastnonce;
++        found =
++          hexminers_predecode_nonce (hexminers, thr, nonce,
++                                     info->wr->lastnonceid, info->diff1);
++        if (found > 0)
++          {
++            info->engines[(uint8_t) info->wr->lastchippos] =
++              info->wr->good_engines;
++            if (hash_count == 0)
++              libhexs_getvoltage (htole16 (info->wr->lastvoltage),
++                                  &info->pic_voltage_readings);
++            hash_count += found;
++            info->matching_work[info->wr->lastchippos]++;
++          }
++        else
++          {
++            inc_hw_errors_hexs (thr, (int) found);
++          }
++      }
++    out:
++      if (ret_r == HEXS_BUF_ERR)
++        info->usb_r_errors++;
++    done:
++      if (ret_r != HEXS_BUF_SKIP)
++        goto again;
++    }
++  ret_r =
++    libhexs_readHashData (hexminers, info->readbuf, &info->hash_write_pos,
++                          HEXMINERS_BULK_READ_TIMEOUT);
++  if (ret_r != LIBUSB_SUCCESS)
++    info->usb_bad_reads++;
++  else
++    info->usb_bad_reads = 0;
++  if (info->usb_bad_reads > 20)
++    libhexs_reset (hexminers);
++  rethash_count = (0x0000ffffull * (int64_t) hash_count);
++  if (libhexs_usb_dead (hexminers))
++    {
++      hexminers->shutdown = true;
++      return -1;
++    }
++  return rethash_count;
++}
++
++static void
++get_hexminers_statline_before (char *buf, size_t bufsiz,
++                               struct cgpu_info *hexminers)
++{
++  if (!hexminers->device_data)
++    return;
++  struct hexminers_info *info = hexminers->device_data;
++  tailsprintf (buf, bufsiz, "%3d %4d/%4dmV", info->frequency,
++               info->core_voltage, info->pic_voltage_readings);
++}
++
++extern void suffix_string (uint64_t val, char *buf, size_t bufsiz,
++                           int sigdigits);
++
++static struct api_data *
++hexminers_api_stats (struct cgpu_info *cgpu)
++{
++  struct api_data *root = NULL;
++  struct timeval now;
++  struct hexminers_info *info = cgpu->device_data;
++  char displayed_hashes[16], displayed_rolling[16];
++  double dev_runtime, hwp;
++  uint64_t dh64, dr64;
++  int i;
++  if (!info)
++    return NULL;
++  hwp =
++    (cgpu->hw_errors +
++     cgpu->diff1) ? (double) (cgpu->hw_errors) / (double) (cgpu->hw_errors +
++                                                           cgpu->diff1) : 0;
++  if (cgpu->dev_start_tv.tv_sec == 0)
++    dev_runtime = total_secs;
++  else
++    {
++      cgtime (&now);
++      dev_runtime = tdiff (&now, &(cgpu->dev_start_tv));
++    }
++  if (dev_runtime < 1.0)
++    dev_runtime = 1.0;
++  dh64 = (double) cgpu->total_mhashes / dev_runtime * 1000000ull;
++  dr64 = (double) cgpu->rolling * 1000000ull;
++  suffix_string (dh64, displayed_hashes, sizeof (displayed_hashes), 4);
++  suffix_string (dr64, displayed_rolling, sizeof (displayed_rolling), 4);
++  root = api_add_string (root, "MHS 5s", displayed_rolling, true);
++  root = api_add_string (root, "MHS av", displayed_hashes, true);
++  root = api_add_int (root, "Hardware Errors", &(cgpu->hw_errors), true);
++  root = api_add_percent (root, "Hardware Errors%", &hwp, true);
++  root = api_add_int (root, "USB Read Errors", &(info->usb_r_errors), true);
++  root = api_add_int (root, "USB Write Errors", &(info->usb_w_errors), true);
++  root =
++    api_add_int (root, "USB Reset Count", &(info->usb_reset_count), true);
++  root =
++    api_add_int (root, "Miner Reset Count", &(info->b_reset_count), true);
++  root =
++    api_add_time (root, "Last Share Time", &(cgpu->last_share_pool_time),
++                  true);
++  root = api_add_int (root, "Chip Count", &(info->asic_count), true);
++  root = api_add_int (root, "Frequency", &(info->frequency), true);
++  root = api_add_int (root, "Core Voltage", &(info->core_voltage), true);
++  root =
++    api_add_int (root, "PIC Voltage Readings", &(info->pic_voltage_readings),
++                 true);
++  for (i = 0; i < info->asic_count; i++)
++    {
++      char mcw[24];
++      sprintf (mcw, "Chip%d Nonces", i + 1);
++      root = api_add_int (root, mcw, &(info->matching_work[i]), true);
++      sprintf (mcw, "Chip%d Engines", i + 1);
++      root = api_add_int (root, mcw, &(info->engines[i]), true);
++    }
++  return root;
++}
++
++struct device_drv hexminers_drv = {
++  .drv_id = DRIVER_hexminers,
++  .dname = "hexminers",
++  .name = "HEXS",
++  .drv_detect = hexminers_detect,
++  .thread_init = hexminers_thread_init,
++  .hash_work = hash_driver_work,
++  .scanwork = hexminers_scanhash,
++  .get_api_stats = hexminers_api_stats,
++  .get_statline_before = get_hexminers_statline_before,
++  .thread_shutdown = hexminers_shutdown,
++};
+--- cg_o/driver-hexminers.h	1970-01-01 02:00:00.000000000 +0200
++++ scrypt_cgminer/driver-hexminers.h	2014-09-22 14:25:50.195914344 +0300
+@@ -0,0 +1,142 @@
++/*$T indentinput.h GC 1.140 10/16/13 10:20:01 */
++
++#ifndef HEXS_H
++#define HEXS_H
++#ifdef USE_HEXMINERS
++#include "util.h"
++
++/* hexminers_task/work_reply status Definitions: */
++#define HEXS_STAT_IDLE					0       /* Idle or data already Sent to the buffer */
++#define HEXS_STAT_NEW_WORK				1       /* Request for write in the buffer */
++#define HEXS_STAT_WAITING				2       /* Wait For Buffer Empty Position */
++#define HEXS_STAT_CLR_BUFF				3       /* Force Buffer Empty */
++#define HEXS_STAT_STOP_REQ				4       /* Stop Request */
++#define HEXS_STAT_NEW_WORK_CLEAR_OLD		5       /* Clear Buffers and after that fill the first buffer */
++#define HEXS_STAT_UNUSED					6
++
++/* libhexs_eatHashData/BUF_reply status Definitions: */
++#define HEXS_BUF_DATA 0
++#define HEXS_BUF_ERR  1
++#define HEXS_BUF_SKIP 2
++
++/*MISC*/
++#define HEXMINERS_ARRAY_PIC_SIZE		64
++#define HEXMINERS_ARRAY_SIZE                  HEXMINERS_ARRAY_PIC_SIZE * 4
++#define HEXMINERS_ARRAY_SIZE_REAL	HEXMINERS_ARRAY_SIZE - 2
++
++#define HEXS_NONCE_CASH_SIZE				4
++
++#define HEXS_USB_R_SIZE					64
++#define HEXS_USB_WR_SIZE					64
++#define HEXS_HASH_BUF_SIZE				1024
++#define HEXS_HASH_BUF_SIZE_OK				HEXS_HASH_BUF_SIZE - 4
++#define HEXMINERS_BULK_READ_TIMEOUT 1000
++#define HEXS_USB_WR_TIME_OUT				500
++
++#define HEXS_MINER_THREADS			1
++#define HEXS_DEFAULT_MINER_NUM		0x01
++#define HEXS_DEFAULT_ASIC_NUM		0x08
++#define HEXS_MIN_FREQUENCY			200
++#define HEXS_MAX_FREQUENCY			1200
++#define HEXS_DEFAULT_FREQUENCY		800
++#define HEXS_DEFAULT_CORE_VOLTAGE	840     /* in millivolts */
++#define HEXS_MIN_COREMV				800     /* in millivolts */
++#define HEXS_MAX_COREMV	1100    /* in millivolts */
++struct chip_results8
++{
++  uint8_t nonce_cache_write_pos;
++  uint32_t nonces[HEXS_NONCE_CASH_SIZE];
++};
++struct work8_result
++{
++  uint8_t startbyte;
++  uint8_t datalength;
++  uint8_t command;
++  uint16_t address;
++  uint32_t lastnonce;           //1x32
++  uint8_t lastnonceid;          //1x32
++  uint8_t status;
++  uint16_t lastvoltage;         //1x32
++  uint8_t lastchippos;          //1x32
++  uint8_t buf_empty_space;      //16 bit words aligned with lastchippos
++  uint8_t good_engines;
++  uint8_t dum;                  //7
++  uint8_t csum;
++  uint8_t pad[2];
++} __attribute__ ((packed, aligned (4)));
++struct hexminers_info
++{
++  bool shut_read;
++  bool shut_write;
++  bool shut_reset;
++  bool diff1;
++  bool reset_work;
++  int write_pos;
++  int roll;
++  double cached_diff;
++  uint32_t asic_difficulty;
++  uint32_t asic_difficulty_one;
++  unsigned int work_block_local;
++  struct work *work;
++  int chip_mask;
++  int miner_count;
++  int asic_count;
++  int core_voltage;
++  int frequency;
++  int usb_r_errors;
++  int usb_w_errors;
++  int usb_reset_count;
++  int usb_bad_reads;
++  int b_reset_count;
++  int pic_voltage_readings;
++  int hash_read_pos;
++  int hash_write_pos;
++  int matching_work[HEXS_DEFAULT_ASIC_NUM];
++  int engines[HEXS_DEFAULT_ASIC_NUM];
++  unsigned char *readbuf;
++  struct work8_result *wr;
++  struct thr_info *thr;
++  struct work **hexworks;
++  struct hexminers_task *ht;
++};
++struct hexminers_task
++{
++  uint8_t startbyte;
++  uint8_t datalength;
++  uint8_t command;
++  uint16_t address;
++  uint16_t id;
++  uint16_t status;       
++  uint32_t bheader[16];
++  uint32_t midstate[4];
++  uint32_t difficulty;
++  uint32_t endNonce;
++  uint8_t csum;
++  uint8_t pad[2];
++} __attribute__ ((packed, aligned (4)));
++struct hexminers_config_task
++{
++  uint8_t startbyte;
++  uint8_t datalength;
++  uint8_t command;
++  uint16_t address;
++  uint16_t hashclock;
++  uint16_t refvoltage;
++  uint32_t difficulty;
++  uint8_t chip_mask;
++  uint8_t wr_interwal;
++  uint8_t csum;
++} __attribute__ ((packed, aligned (4)));
++
++#define HEXS_WORKANSWER_ADR	0x3000
++#define HEXMINERS_TASK_SIZE	(sizeof(struct hexminers_task)-2)
++#define HEXS_MAX_WORK_SIZE		(sizeof(struct work8_result)-2)
++#define HEXS_BASE_WORK_SIZE		6
++
++extern int opt_hexminers_core_voltage;
++extern int opt_hexminers_chip_mask;
++extern int opt_hexminers_set_config_diff_to_one;
++
++extern struct hexminers_info **hexminers_info;
++#endif /* USE_HEXMINERS */
++#endif /* HEXS_H */
+--- cg_o/libhexs.c	1970-01-01 02:00:00.000000000 +0200
++++ scrypt_cgminer/libhexs.c	2014-09-22 14:25:50.195914344 +0300
+@@ -0,0 +1,187 @@
++//Thank you Zefir !!!!
++static uint32_t
++libhexs_get_target (double diff)
++{
++  unsigned nBits;
++  int shift = 29;
++  double ftarg = (double) 0x0000ffff / diff;
++  while (ftarg < (double) 0x00008000)
++    {
++      shift--;
++      ftarg *= 256.0;
++    } while (ftarg >= (double) 0x00800000)
++    {
++      shift++;
++      ftarg /= 256.0;
++    } nBits = (int) ftarg + (shift << 24);
++  return nBits;
++}
++static void
++libhexs_csum (unsigned char *startptr, unsigned char *endptr,
++              unsigned char *resptr)
++{
++  unsigned char *b = startptr;
++  uint8_t sum = 0;
++  while (b < endptr)
++    sum += *b++;
++  memcpy (resptr, &sum, 1);
++}
++static bool
++libhexs_usb_dead (struct cgpu_info *hexminers)
++{
++  struct cg_usb_device *usbdev;
++  struct hexminers_info *info = hexminers->device_data;
++  usbdev = hexminers->usbdev;
++  bool ret = (usbdev == NULL || usbdev->handle == NULL || hexminers->shutdown
++              || info->shut_read || info->shut_write || info->shut_reset
++              || hexminers->usbinfo.nodev || hexminers->deven != DEV_ENABLED);
++  return ret;
++}
++
++static int
++libhexs_sendHashData (struct cgpu_info *hexminers, unsigned char *sendbuf,
++                      size_t buf_len)
++{
++  struct hexminers_info *info = hexminers->device_data;
++  struct cg_usb_device *usbdev;
++  int wrote = 0, written = 0;
++  int err = LIBUSB_SUCCESS;
++  usbdev = hexminers->usbdev;
++  if (libhexs_usb_dead (hexminers))
++    goto out;
++  while (written < buf_len && err == LIBUSB_SUCCESS)
++    {
++      err =
++        libusb_bulk_transfer (usbdev->handle, 0x02, sendbuf + written,
++                              MIN (HEXS_USB_WR_SIZE, buf_len - written),
++                              &wrote, HEXS_USB_WR_TIME_OUT);
++      if (err == LIBUSB_SUCCESS)
++        written += wrote;
++    }
++out:
++  if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_NOT_FOUND)
++    info->shut_write = true;
++  return written;
++}
++
++static void
++libhexs_reset (struct cgpu_info *hexminers)
++{
++  struct hexminers_info *info = hexminers->device_data;
++  struct cg_usb_device *usbdev;
++  int err = LIBUSB_SUCCESS;
++  usbdev = hexminers->usbdev;
++  if (libhexs_usb_dead (hexminers))
++    goto out;
++  err = libusb_reset_device (usbdev->handle);
++out:
++  if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_NOT_FOUND)
++    info->shut_reset = true;
++  info->usb_reset_count++;
++}
++
++static int
++libhexs_readHashData (struct cgpu_info *hexminers, unsigned char *hash,
++                      int *hash_write_pos, int timeout)
++{
++  struct hexminers_info *info = hexminers->device_data;
++  struct cg_usb_device *usbdev;
++  int read = 0;
++  int err = LIBUSB_SUCCESS;
++  usbdev = hexminers->usbdev;
++  if (libhexs_usb_dead (hexminers))
++    goto out;
++  err =
++    libusb_bulk_transfer (usbdev->handle, 0x82, hash + *hash_write_pos,
++                          HEXS_USB_R_SIZE, &read, timeout);
++  if (err == LIBUSB_SUCCESS)
++    *hash_write_pos += MIN (read, HEXS_USB_R_SIZE);
++out:
++  if (err == LIBUSB_ERROR_NO_DEVICE || err == LIBUSB_ERROR_NOT_FOUND)
++    info->shut_read = true;
++  return err;
++}
++
++static double
++hexminers_predecode_nonce (struct cgpu_info *hexminers, struct thr_info *thr,
++                           uint32_t nonce, uint8_t work_id, bool diff1)
++{
++  struct hexminers_info *info = hexminers->device_data;
++  if (info->hexworks[work_id]->pool == NULL)
++    return 0;
++  double diff = (diff1
++                 || info->hexworks[work_id]->ping ? 1 : info->
++                 hexworks[work_id]->work_difficulty);
++  if (test_nonce (info->hexworks[work_id], nonce))
++    {
++      submit_tested_work_fast_clone (thr, info->hexworks[work_id], diff1
++                                     || info->hexworks[work_id]->ping);
++      return diff;
++    }
++  return -diff;
++}
++
++static void
++libhexs_getvoltage (uint16_t wr_bukvoltage, int *info_pic_voltage_readings)
++{
++  float voltagehuman;
++  voltagehuman =
++    (float) ((float) wr_bukvoltage * (float) 3300 / (float) ((1 << 12) - 1));
++  *info_pic_voltage_readings = (int) voltagehuman;
++}
++
++static void
++libhexs_setvoltage (int info_voltage, uint16_t * refvoltage)
++{
++  uint16_t voltageadc;
++  voltageadc =
++    (uint16_t) ((float) info_voltage / (float) 1000 / (float) 3.3 *
++                ((1 << 12) - 1));
++  *refvoltage = htole16 (voltageadc);
++}
++
++static int
++libhexs_eatHashData (struct work8_result *wr, unsigned char *hash,
++                     int *hash_read_pos, int *hash_write_pos)
++{
++  uint8_t psum;
++  int wrpos;
++  unsigned char *csum_pos;
++  bool ok;
++  int places = 0;
++eat:
++  while (*hash_read_pos < *hash_write_pos && hash[*hash_read_pos] != 0x53)
++    *hash_read_pos += 1;
++  places = *hash_write_pos - *hash_read_pos;
++  if (places < 8)
++    return HEXS_BUF_SKIP;
++  memcpy ((char *) &wr->startbyte, &hash[*hash_read_pos],
++          HEXS_BASE_WORK_SIZE - 1);
++  wr->address = htole16 (wr->address);
++  ok = (wr->command == 0x52)
++    && ((wr->address == HEXS_WORKANSWER_ADR && wr->datalength == 0x06)
++        || (wr->address == 0x3008 && wr->datalength == 1));
++  if (!ok)
++    {
++      *hash_read_pos += 1;
++      goto eat;
++    }
++  if (places < HEXS_BASE_WORK_SIZE + wr->datalength * 2)
++    return HEXS_BUF_SKIP;
++  csum_pos =
++    hash + *hash_read_pos + HEXS_BASE_WORK_SIZE + wr->datalength * 2 - 1;
++  libhexs_csum (hash + *hash_read_pos, csum_pos, &psum);
++  if (psum != *csum_pos)
++    {
++      *hash_read_pos += 1;
++      return HEXS_BUF_ERR;
++    }
++  wrpos = (wr->address - HEXS_WORKANSWER_ADR) + HEXS_BASE_WORK_SIZE - 1;
++  memcpy ((char *) &wr->startbyte + wrpos,
++          &hash[*hash_read_pos + HEXS_BASE_WORK_SIZE - 1],
++          wr->datalength * 2);
++  *hash_read_pos += HEXS_BASE_WORK_SIZE + wr->datalength * 2;
++  return HEXS_BUF_DATA;
++}
++
++
+--- cg_o/scrypt.c	1970-01-01 02:00:00.000000000 +0200
++++ scrypt_cgminer/scrypt.c	2014-09-22 14:25:50.195914344 +0300
+@@ -0,0 +1,839 @@
++/*-
++ * Copyright 2009 Colin Percival, 2011 ArtForz
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * This file was originally written by Colin Percival as part of the Tarsnap
++ * online backup system.
++ */
++
++#include "config.h"
++#include "miner.h"
++
++#include <stdlib.h>
++#include <stdint.h>
++#include <string.h>
++//#define DBG_BOZA
++typedef struct SHA256Context
++{
++  uint32_t state[8];
++  uint32_t buf[16];
++} SHA256_CTX;
++/*
++static inline void swap32yes(void*out, const void*in, size_t sz) {
++	size_t swapcounter = 0;
++	for (swapcounter = 0; swapcounter < sz; ++swapcounter)
++		(((uint32_t*)out)[swapcounter]) = swab32(((uint32_t*)in)[swapcounter]);
++}
++*/
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++
++static inline void
++be32enc_vectbig (uint32_t * dst, const uint32_t * src, uint32_t len)
++{
++  uint32_t i;
++
++  for (i = 0; i < len; i++)
++    dst[i] = bswap_32 (src[i]);
++}
++
++#endif
++/*
++ * Encode a length len/4 vector of (uint32_t) into a length len vector of
++ * (unsigned char) in big-endian form.  Assumes len is a multiple of 4.
++ */
++static inline void
++be32enc_vect (uint32_t * dst, const uint32_t * src, uint32_t len)
++{
++  uint32_t i;
++
++  for (i = 0; i < len; i++)
++    dst[i] = htobe32 (src[i]);
++}
++
++/* Elementary functions used by SHA256 */
++#define Ch(x, y, z)	((x & (y ^ z)) ^ z)
++#define Maj(x, y, z)	((x & (y | z)) | (y & z))
++#define SHR(x, n)	(x >> n)
++#define ROTR(x, n)	((x >> n) | (x << (32 - n)))
++#define S0(x)		(ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
++#define S1(x)		(ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
++#define s0(x)		(ROTR(x, 7) ^ ROTR(x, 18) ^ SHR(x, 3))
++#define s1(x)		(ROTR(x, 17) ^ ROTR(x, 19) ^ SHR(x, 10))
++
++/* SHA256 round function */
++#define RND(a, b, c, d, e, f, g, h, k)			\
++	t0 = h + S1(e) + Ch(e, f, g) + k;		\
++	t1 = S0(a) + Maj(a, b, c);			\
++	d += t0;					\
++	h  = t0 + t1;
++
++/* Adjusted round function for rotating state */
++#define RNDr(S, W, i, k)			\
++	RND(S[(64 - i) % 8], S[(65 - i) % 8],	\
++	    S[(66 - i) % 8], S[(67 - i) % 8],	\
++	    S[(68 - i) % 8], S[(69 - i) % 8],	\
++	    S[(70 - i) % 8], S[(71 - i) % 8],	\
++	    W[i] + k)
++
++/*
++ * SHA256 block compression function.  The 256-bit state is transformed via
++ * the 512-bit input block to produce a new state.
++ */
++static void
++SHA256_Transform (uint32_t * state, const uint32_t block[16], int swap)
++{
++  uint32_t W[64];
++  uint32_t S[8];
++  uint32_t t0, t1;
++  int i;
++
++
++  /* 1. Prepare message schedule W. */
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  memcpy (W, block, 64);
++#else
++
++  if (swap)
++    for (i = 0; i < 16; i++)
++      {
++        W[i] = htobe32 (block[i]);
++      }
++  else
++    memcpy (W, block, 64);
++#endif
++  for (i = 16; i < 64; i += 2)
++    {
++      W[i] = s1 (W[i - 2]) + W[i - 7] + s0 (W[i - 15]) + W[i - 16];
++      W[i + 1] = s1 (W[i - 1]) + W[i - 6] + s0 (W[i - 14]) + W[i - 15];
++    }
++
++  /* 2. Initialize working variables. */
++  memcpy (S, state, 32);
++
++  /* 3. Mix. */
++  RNDr (S, W, 0, 0x428a2f98);
++  RNDr (S, W, 1, 0x71374491);
++  RNDr (S, W, 2, 0xb5c0fbcf);
++  RNDr (S, W, 3, 0xe9b5dba5);
++  RNDr (S, W, 4, 0x3956c25b);
++  RNDr (S, W, 5, 0x59f111f1);
++  RNDr (S, W, 6, 0x923f82a4);
++  RNDr (S, W, 7, 0xab1c5ed5);
++  RNDr (S, W, 8, 0xd807aa98);
++  RNDr (S, W, 9, 0x12835b01);
++  RNDr (S, W, 10, 0x243185be);
++  RNDr (S, W, 11, 0x550c7dc3);
++  RNDr (S, W, 12, 0x72be5d74);
++  RNDr (S, W, 13, 0x80deb1fe);
++  RNDr (S, W, 14, 0x9bdc06a7);
++  RNDr (S, W, 15, 0xc19bf174);
++  RNDr (S, W, 16, 0xe49b69c1);
++  RNDr (S, W, 17, 0xefbe4786);
++  RNDr (S, W, 18, 0x0fc19dc6);
++  RNDr (S, W, 19, 0x240ca1cc);
++  RNDr (S, W, 20, 0x2de92c6f);
++  RNDr (S, W, 21, 0x4a7484aa);
++  RNDr (S, W, 22, 0x5cb0a9dc);
++  RNDr (S, W, 23, 0x76f988da);
++  RNDr (S, W, 24, 0x983e5152);
++  RNDr (S, W, 25, 0xa831c66d);
++  RNDr (S, W, 26, 0xb00327c8);
++  RNDr (S, W, 27, 0xbf597fc7);
++  RNDr (S, W, 28, 0xc6e00bf3);
++  RNDr (S, W, 29, 0xd5a79147);
++  RNDr (S, W, 30, 0x06ca6351);
++  RNDr (S, W, 31, 0x14292967);
++  RNDr (S, W, 32, 0x27b70a85);
++  RNDr (S, W, 33, 0x2e1b2138);
++  RNDr (S, W, 34, 0x4d2c6dfc);
++  RNDr (S, W, 35, 0x53380d13);
++  RNDr (S, W, 36, 0x650a7354);
++  RNDr (S, W, 37, 0x766a0abb);
++  RNDr (S, W, 38, 0x81c2c92e);
++  RNDr (S, W, 39, 0x92722c85);
++  RNDr (S, W, 40, 0xa2bfe8a1);
++  RNDr (S, W, 41, 0xa81a664b);
++  RNDr (S, W, 42, 0xc24b8b70);
++  RNDr (S, W, 43, 0xc76c51a3);
++  RNDr (S, W, 44, 0xd192e819);
++  RNDr (S, W, 45, 0xd6990624);
++  RNDr (S, W, 46, 0xf40e3585);
++  RNDr (S, W, 47, 0x106aa070);
++  RNDr (S, W, 48, 0x19a4c116);
++  RNDr (S, W, 49, 0x1e376c08);
++  RNDr (S, W, 50, 0x2748774c);
++  RNDr (S, W, 51, 0x34b0bcb5);
++  RNDr (S, W, 52, 0x391c0cb3);
++  RNDr (S, W, 53, 0x4ed8aa4a);
++  RNDr (S, W, 54, 0x5b9cca4f);
++  RNDr (S, W, 55, 0x682e6ff3);
++  RNDr (S, W, 56, 0x748f82ee);
++  RNDr (S, W, 57, 0x78a5636f);
++  RNDr (S, W, 58, 0x84c87814);
++  RNDr (S, W, 59, 0x8cc70208);
++  RNDr (S, W, 60, 0x90befffa);
++  RNDr (S, W, 61, 0xa4506ceb);
++  RNDr (S, W, 62, 0xbef9a3f7);
++  RNDr (S, W, 63, 0xc67178f2);
++
++  /* 4. Mix local working variables into global state */
++  for (i = 0; i < 8; i++)
++    {
++      state[i] += S[i];
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++      //state[i] = bswap_32(state[i]);
++#endif
++    }
++}
++
++static inline void
++SHA256_InitState (uint32_t * state)
++{
++  /* Magic initialization constants */
++  state[0] = 0x6A09E667;
++  state[1] = 0xBB67AE85;
++  state[2] = 0x3C6EF372;
++  state[3] = 0xA54FF53A;
++  state[4] = 0x510E527F;
++  state[5] = 0x9B05688C;
++  state[6] = 0x1F83D9AB;
++  state[7] = 0x5BE0CD19;
++}
++
++static const uint32_t passwdpad[12] =
++  { 0x00000080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80020000 };
++static const uint32_t outerpad[8] =
++  { 0x80000000, 0, 0, 0, 0, 0, 0, 0x00000300 };
++
++/**
++ * PBKDF2_SHA256(passwd, passwdlen, salt, saltlen, c, buf, dkLen):
++ * Compute PBKDF2(passwd, salt, c, dkLen) using HMAC-SHA256 as the PRF, and
++ * write the output to buf.  The value dkLen must be at most 32 * (2^32 - 1).
++ */
++static inline void
++PBKDF2_SHA256_80_128 (const uint32_t * passwd, uint32_t * buf)
++{
++  SHA256_CTX PShictx, PShoctx;
++  uint32_t tstate[8];
++  uint32_t ihash[8];
++  uint32_t i;
++  uint32_t pad[16];
++
++  static const uint32_t innerpad[11] =
++    { 0x00000080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xa0040000 };
++
++  /* If Klen > 64, the key is really SHA256(K). */
++  SHA256_InitState (tstate);
++  SHA256_Transform (tstate, passwd, 1);
++#ifdef DBG_BOZA
++  char *hash1;
++#endif
++#ifdef DBG_BOZA
++  hash1 = bin2hex ((char *) passwd, sizeof (passwd));
++  applog (LOG_ERR, "passwd %s", hash1);
++
++  free (hash1);
++#endif
++#ifdef DBG_BOZA
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  hash1 = bin2hex ((char *) tstate, sizeof (tstate));
++  applog (LOG_ERR, "tstate %s", hash1);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  free (hash1);
++#endif
++  memcpy (pad, passwd + 16, 16);
++  memcpy (pad + 4, passwdpad, 48);
++#ifdef DBG_BOZA
++  hash1 = bin2hex ((char *) passwd, sizeof (passwd));
++  applog (LOG_ERR, "passwd %s", hash1);
++
++  free (hash1);
++#endif
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 4);
++#endif
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++
++#endif
++  hash1 = bin2hex ((char *) pad, sizeof (pad));
++  applog (LOG_ERR, "PAD %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++#endif
++  free (hash1);
++#endif
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++#endif
++  SHA256_Transform (tstate, pad, 1);
++
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  hash1 = bin2hex ((char *) tstate, sizeof (tstate));
++  applog (LOG_ERR, "tstate1 %s", hash1);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  free (hash1);
++#endif
++  memcpy (ihash, tstate, 32);
++
++  SHA256_InitState (PShictx.state);
++  for (i = 0; i < 8; i++)
++    pad[i] = ihash[i] ^ 0x36363636;
++  for (; i < 16; i++)
++    pad[i] = 0x36363636;
++
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++
++#endif
++  hash1 = bin2hex ((char *) pad, sizeof (pad));
++  applog (LOG_ERR, "PAD1 %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++#endif
++  free (hash1);
++#endif
++
++  SHA256_Transform (PShictx.state, pad, 0);
++
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShictx.state[0], &PShictx.state[0], 16);
++
++#endif
++  hash1 = bin2hex ((char *) PShictx.state, sizeof (PShictx.state));
++  applog (LOG_ERR, "PShictx.state PAD %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShictx.state[0], &PShictx.state[0], 16);
++#endif
++  free (hash1);
++#endif
++
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&passwd[0], &passwd[0], 4);
++
++#endif
++  hash1 = bin2hex ((char *) passwd, sizeof (passwd));
++  applog (LOG_ERR, "passwd %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&passwd[0], &passwd[0], 4);
++#endif
++  free (hash1);
++#endif
++
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  //swap32yes(&passwd[0], &passwd[0], 4);
++#endif
++
++  SHA256_Transform (PShictx.state, passwd, 1);
++
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShictx.state[0], &PShictx.state[0], 16);
++
++#endif
++  hash1 = bin2hex ((char *) PShictx.state, sizeof (PShictx.state));
++  applog (LOG_ERR, "PShictx.state passwd %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShictx.state[0], &PShictx.state[0], 16);
++#endif
++  free (hash1);
++#endif
++
++  be32enc_vect (PShictx.buf, passwd + 16, 4);
++
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShictx.buf[0], &PShictx.buf[0], 128 / 4);
++
++#endif
++  hash1 = bin2hex ((char *) PShictx.buf, sizeof (PShictx.buf));
++  applog (LOG_ERR, "PShictx.buf %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShictx.buf[0], &PShictx.buf[0], 128 / 4);
++#endif
++  free (hash1);
++#endif
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++
++  be32enc_vectbig (PShictx.buf + 5, innerpad, 11);
++#else
++  be32enc_vect (PShictx.buf + 5, innerpad, 11);
++#endif
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShictx.buf[0], &PShictx.buf[0], 128 / 4);
++
++#endif
++  hash1 = bin2hex ((char *) PShictx.buf, sizeof (PShictx.buf));
++  applog (LOG_ERR, "PShictx.buf %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShictx.buf[0], &PShictx.buf[0], 128 / 4);
++#endif
++  free (hash1);
++#endif
++
++  SHA256_InitState (PShoctx.state);
++  for (i = 0; i < 8; i++)
++    pad[i] = ihash[i] ^ 0x5c5c5c5c;
++  for (; i < 16; i++)
++    pad[i] = 0x5c5c5c5c;
++  SHA256_Transform (PShoctx.state, pad, 0);
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShoctx.state[0], &PShoctx.state[0],
++             sizeof (PShoctx.state) / 4);
++
++#endif
++  hash1 = bin2hex ((char *) PShoctx.state, sizeof (PShoctx.state));
++  applog (LOG_ERR, "PShoctx.state %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShoctx.state[0], &PShoctx.state[0],
++             sizeof (PShoctx.state) / 4);
++#endif
++  free (hash1);
++#endif
++
++
++  memcpy (PShoctx.buf + 8, outerpad, 32);
++
++  /* Iterate through the blocks. */
++  for (i = 0; i < 4; i++)
++    {
++      uint32_t istate[8];
++      uint32_t ostate[8];
++
++      memcpy (istate, PShictx.state, 32);
++      PShictx.buf[4] = i + 1;
++      SHA256_Transform (istate, PShictx.buf, 0);
++      memcpy (PShoctx.buf, istate, 32);
++
++      memcpy (ostate, PShoctx.state, 32);
++      SHA256_Transform (ostate, PShoctx.buf, 0);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++
++      be32enc_vectbig (buf + i * 8, ostate, 8);;
++#else
++      be32enc_vect (buf + i * 8, ostate, 8);
++#endif
++
++    }
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&buf[0], &buf[0], sizeof (buf) / 4);
++
++#endif
++  hash1 = bin2hex ((char *) buf, sizeof (buf));
++  applog (LOG_ERR, "BOZA buf %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&buf[0], &buf[0], sizeof (buf) / 4);
++#endif
++  free (hash1);
++#endif
++
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShoctx.state[0], &PShoctx.state[0],
++             sizeof (PShoctx.state) / 4);
++
++#endif
++  hash1 = bin2hex ((char *) PShoctx.state, sizeof (PShoctx.state));
++  applog (LOG_ERR, "BOZA PShoctx.state %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&PShoctx.state[0], &PShoctx.state[0],
++             sizeof (PShoctx.state) / 4);
++#endif
++  free (hash1);
++#endif
++}
++
++
++static inline void
++PBKDF2_SHA256_80_128_32 (const uint32_t * passwd, const uint32_t * salt,
++                         uint32_t * ostate)
++{
++  uint32_t tstate[8];
++  uint32_t ihash[8];
++  uint32_t i;
++
++  /* Compute HMAC state after processing P and S. */
++  uint32_t pad[16];
++
++  static const uint32_t ihash_finalblk[16] =
++    { 0x00000001, 0x80000000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++0x00000620 };
++
++  /* If Klen > 64, the key is really SHA256(K). */
++  SHA256_InitState (tstate);
++  SHA256_Transform (tstate, passwd, 1);
++#ifdef DBG_BOZA
++  char *hash1;
++#endif
++#ifdef DBG_BOZA
++  hash1 = bin2hex ((char *) passwd, sizeof (passwd));
++  applog (LOG_ERR, "passwd %s", hash1);
++
++  free (hash1);
++#endif
++#ifdef DBG_BOZA
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  hash1 = bin2hex ((char *) tstate, sizeof (tstate));
++  applog (LOG_ERR, "tstate %s", hash1);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  free (hash1);
++#endif
++  memcpy (pad, passwd + 16, 16);
++  memcpy (pad + 4, passwdpad, 48);
++#ifdef DBG_BOZA
++  hash1 = bin2hex ((char *) passwd, sizeof (passwd));
++  applog (LOG_ERR, "passwd %s", hash1);
++
++  free (hash1);
++#endif
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 4);
++#endif
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++
++#endif
++  hash1 = bin2hex ((char *) pad, sizeof (pad));
++  applog (LOG_ERR, "PAD %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++#endif
++  free (hash1);
++#endif
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++#endif
++  SHA256_Transform (tstate, pad, 1);
++
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  hash1 = bin2hex ((char *) tstate, sizeof (tstate));
++  applog (LOG_ERR, "tstate1 %s", hash1);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  free (hash1);
++#endif
++  memcpy (ihash, tstate, 32);
++
++
++  SHA256_InitState (ostate);
++  for (i = 0; i < 8; i++)
++    pad[i] = ihash[i] ^ 0x5c5c5c5c;
++  for (; i < 16; i++)
++    pad[i] = 0x5c5c5c5c;
++  SHA256_Transform (ostate, pad, 0);
++
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++
++#endif
++  hash1 = bin2hex ((char *) pad, sizeof (pad));
++  applog (LOG_ERR, "PAD1 %s", hash1);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&pad[0], &pad[0], 16);
++#endif
++  free (hash1);
++#endif
++
++
++  SHA256_InitState (tstate);
++  for (i = 0; i < 8; i++)
++    pad[i] = ihash[i] ^ 0x36363636;
++  for (; i < 16; i++)
++    pad[i] = 0x36363636;
++  SHA256_Transform (tstate, pad, 0);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++
++  swap32yes (&salt[0], &salt[0], 32);
++#endif
++#ifdef DBG_BOZA
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  hash1 = bin2hex ((char *) tstate, sizeof (tstate));
++  applog (LOG_ERR, "Kratstate1 %s", hash1);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&tstate[0], &tstate[0], 8);
++#endif
++  free (hash1);
++#endif
++
++  SHA256_Transform (tstate, salt, 1);
++  SHA256_Transform (tstate, salt + 16, 1);
++  SHA256_Transform (tstate, ihash_finalblk, 0);
++  memcpy (pad, tstate, 32);
++  memcpy (pad + 8, outerpad, 32);
++
++  /* Feed the inner hash to the outer SHA256 operation. */
++  SHA256_Transform (ostate, pad, 0);
++}
++
++
++/**
++ * salsa20_8(B):
++ * Apply the salsa20/8 core to the provided block.
++ */
++static inline void
++salsa20_8 (uint32_t B[16], const uint32_t Bx[16])
++{
++  uint32_t x00, x01, x02, x03, x04, x05, x06, x07, x08, x09, x10, x11, x12,
++    x13, x14, x15;
++  size_t i;
++
++  x00 = (B[0] ^= Bx[0]);
++  x01 = (B[1] ^= Bx[1]);
++  x02 = (B[2] ^= Bx[2]);
++  x03 = (B[3] ^= Bx[3]);
++  x04 = (B[4] ^= Bx[4]);
++  x05 = (B[5] ^= Bx[5]);
++  x06 = (B[6] ^= Bx[6]);
++  x07 = (B[7] ^= Bx[7]);
++  x08 = (B[8] ^= Bx[8]);
++  x09 = (B[9] ^= Bx[9]);
++  x10 = (B[10] ^= Bx[10]);
++  x11 = (B[11] ^= Bx[11]);
++  x12 = (B[12] ^= Bx[12]);
++  x13 = (B[13] ^= Bx[13]);
++  x14 = (B[14] ^= Bx[14]);
++  x15 = (B[15] ^= Bx[15]);
++  for (i = 0; i < 8; i += 2)
++    {
++#define R(a,b) (((a) << (b)) | ((a) >> (32 - (b))))
++      /* Operate on columns. */
++      x04 ^= R (x00 + x12, 7);
++      x09 ^= R (x05 + x01, 7);
++      x14 ^= R (x10 + x06, 7);
++      x03 ^= R (x15 + x11, 7);
++      x08 ^= R (x04 + x00, 9);
++      x13 ^= R (x09 + x05, 9);
++      x02 ^= R (x14 + x10, 9);
++      x07 ^= R (x03 + x15, 9);
++      x12 ^= R (x08 + x04, 13);
++      x01 ^= R (x13 + x09, 13);
++      x06 ^= R (x02 + x14, 13);
++      x11 ^= R (x07 + x03, 13);
++      x00 ^= R (x12 + x08, 18);
++      x05 ^= R (x01 + x13, 18);
++      x10 ^= R (x06 + x02, 18);
++      x15 ^= R (x11 + x07, 18);
++
++      /* Operate on rows. */
++      x01 ^= R (x00 + x03, 7);
++      x06 ^= R (x05 + x04, 7);
++      x11 ^= R (x10 + x09, 7);
++      x12 ^= R (x15 + x14, 7);
++      x02 ^= R (x01 + x00, 9);
++      x07 ^= R (x06 + x05, 9);
++      x08 ^= R (x11 + x10, 9);
++      x13 ^= R (x12 + x15, 9);
++      x03 ^= R (x02 + x01, 13);
++      x04 ^= R (x07 + x06, 13);
++      x09 ^= R (x08 + x11, 13);
++      x14 ^= R (x13 + x12, 13);
++      x00 ^= R (x03 + x02, 18);
++      x05 ^= R (x04 + x07, 18);
++      x10 ^= R (x09 + x08, 18);
++      x15 ^= R (x14 + x13, 18);
++#undef R
++    }
++  B[0] += x00;
++  B[1] += x01;
++  B[2] += x02;
++  B[3] += x03;
++  B[4] += x04;
++  B[5] += x05;
++  B[6] += x06;
++  B[7] += x07;
++  B[8] += x08;
++  B[9] += x09;
++  B[10] += x10;
++  B[11] += x11;
++  B[12] += x12;
++  B[13] += x13;
++  B[14] += x14;
++  B[15] += x15;
++}
++
++/* cpu and memory intensive function to transform a 80 byte buffer into a 32 byte output
++   scratchpad size needs to be at least 63 + (128 * r * p) + (256 * r + 64) + (128 * r * N) bytes
++ */
++static void
++scrypt_1024_1_1_256_sp (const uint32_t * input, char *scratchpad,
++                        uint32_t * ostate)
++{
++  uint32_t *V;
++  uint32_t X[32];
++  uint32_t i;
++  uint32_t j;
++  uint32_t k;
++  uint64_t *p1, *p2;
++
++  p1 = (uint64_t *) X;
++  V = (uint32_t *) (((uintptr_t) (scratchpad) + 63) & ~(uintptr_t) (63));
++
++  PBKDF2_SHA256_80_128 (input, X);
++
++  for (i = 0; i < 1024; i += 2)
++    {
++      memcpy (&V[i * 32], X, 128);
++
++      salsa20_8 (&X[0], &X[16]);
++      salsa20_8 (&X[16], &X[0]);
++
++      memcpy (&V[(i + 1) * 32], X, 128);
++
++      salsa20_8 (&X[0], &X[16]);
++      salsa20_8 (&X[16], &X[0]);
++    }
++  for (i = 0; i < 1024; i += 2)
++    {
++      j = X[16] & 1023;
++      p2 = (uint64_t *) (&V[j * 32]);
++      for (k = 0; k < 16; k++)
++        p1[k] ^= p2[k];
++
++      salsa20_8 (&X[0], &X[16]);
++      salsa20_8 (&X[16], &X[0]);
++
++      j = X[16] & 1023;
++      p2 = (uint64_t *) (&V[j * 32]);
++      for (k = 0; k < 16; k++)
++        p1[k] ^= p2[k];
++
++      salsa20_8 (&X[0], &X[16]);
++      salsa20_8 (&X[16], &X[0]);
++    }
++
++#ifdef DBG_BOZA
++  char *hash1;
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&input[0], &input[0], sizeof (input) / 4);
++#endif
++  hash1 = bin2hex ((char *) input, sizeof (input));
++  applog (LOG_ERR, "input %s", hash1);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&input[0], &input[0], sizeof (input) / 4);
++#endif
++  free (hash1);
++#endif
++#ifdef DBG_BOZA
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&X[0], &X[0], sizeof (X) / 4);
++#endif
++  hash1 = bin2hex ((char *) X, sizeof (X));
++  applog (LOG_ERR, "X %s", hash1);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&X[0], &X[0], sizeof (X) / 4);
++#endif
++  free (hash1);
++#endif
++#ifdef DBG_BOZA
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&ostate[0], &ostate[0], sizeof (ostate) / 4);
++#endif
++  hash1 = bin2hex ((char *) ostate, sizeof (ostate));
++  applog (LOG_ERR, "ostate %s", hash1);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  swap32yes (&ostate[0], &ostate[0], sizeof (ostate) / 4);
++#endif
++  free (hash1);
++#endif
++
++
++  PBKDF2_SHA256_80_128_32 (input, X, ostate);
++}
++
++/* 131583 rounded up to 4 byte alignment */
++#define SCRATCHBUF_SIZE	(131584)
++
++void
++scrypt_regenhash (struct work *work)
++{
++  uint32_t data[20];
++  //char *scratchbuf;
++  char scratchbuf[SCRATCHBUF_SIZE];
++  uint32_t *nonce = (uint32_t *) (work->data + 76);
++  uint32_t *ohash = (uint32_t *) (work->hash);
++
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++  be32enc_vectbig (data, (const uint32_t *) work->data, 19);
++  data[19] = htole32 (*nonce);
++#else
++  be32enc_vect (data, (const uint32_t *) work->data, 19);
++  data[19] = htobe32 (*nonce);
++
++#endif
++
++  //scratchbuf = alloca(SCRATCHBUF_SIZE);
++  scrypt_1024_1_1_256_sp (data, scratchbuf, ohash);
++#if defined(__BIG_ENDIAN__) || defined(MIPSEB)
++#else
++  flip32 (ohash, ohash);
++#endif
++}
+--- cg_o/scrypt.h	1970-01-01 02:00:00.000000000 +0200
++++ scrypt_cgminer/scrypt.h	2014-09-22 14:25:50.195914344 +0300
+@@ -0,0 +1,10 @@
++#ifndef SCRYPT_H
++#define SCRYPT_H
++
++#include "miner.h"
++
++
++extern void scrypt_regenhash(struct work *work);
++
++
++#endif /* SCRYPT_H */
