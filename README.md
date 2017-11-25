@@ -16,19 +16,7 @@ Extranonce patch from nicehash were included too.
 ![](https://github.com/wareck/cgminer-hexminer/blob/master/patches_and_diy/images/hexminer.jpg)
 
 
-How to build Scrypt version:
-
-	sudo apt-get update
-	sudo apt-get install build-essential autoconf automake libtool pkg-config libcurl4-openssl-dev libudev-dev \
-	libjansson-dev libncurses5-dev libudev-dev libjansson-dev
-	cd hexminer_scrypt
-	./autogen.sh
-	./configure --enable-scrypt --enable-hexminer
-	make
-	make install
-
-
-How to build SHA256 version with all hexminer:
+How to build SHA256 version with all miners :
 
 	sudo apt-get update
 	sudo apt-get install build-essential autoconf automake libtool pkg-config libcurl4-openssl-dev libudev-dev \
