@@ -5,7 +5,7 @@ CGMiner v4.6.1 with Hexminer ASIC support.
 
 This file describes cgminer specific settings and options.
 
-For general CGMiner information refer to doc/README inside each version (scrypt or sha256).
+For general CGMiner information refer to doc/README .
 
 ## Hexminer : ##
 
